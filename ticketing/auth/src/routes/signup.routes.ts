@@ -22,13 +22,10 @@ router.post(
     }
 
     console.log("Creating a user...");
+    throw new DatabaseConnectionError();
 
-    new DatabaseConnectionError();
-
-    return res.status(200).json({
-      message: "hi there",
-    });
+    return res.send();
   }
 );
 
-export { router as signupRouer };
+export { router as signupRouter };
