@@ -10,10 +10,10 @@ import { signupRouter } from "./routes/signup.routes";
 const app = express();
 app.use(express.json());
 
-app.use("/api/v1/users", currentUFserRouter);
-app.use("/api/v1/users", signinRouter);
-app.use("/api/v1/users", signoutRouter);
-app.use("/api/v1/users", signupRouter);
+app.use("/api/users", currentUFserRouter);
+app.use("/api/users", signinRouter);
+app.use("/api/users", signoutRouter);
+app.use("/api/users", signupRouter);
 
 app.all("*", async (req, res) => {
   throw new NotFoundError();
