@@ -1,10 +1,11 @@
 import { Router } from "express";
+import { currentUser } from "../middlewares/currentUser";
 
 const router = Router();
 
-router.get("/currentuser", (req, res) => {
-  return res.status(200).json({
-    message: "hi there",
+router.get("/currentuser", currentUser, (req, res) => {
+  return res.send({
+    currentUser: req.currentUser || null,
   });
 });
 
