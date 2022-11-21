@@ -9,4 +9,4 @@ router.get("/currentuser", currentUser, (req, res) => {
   });
 });
 
-export { router as currentUFserRouter };
+export { router as currentUserRouter };
