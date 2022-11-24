@@ -1,6 +1,6 @@
 {
   "name": "@itsme33/common",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "",
   "main": "./build/index.js",
   "types": "./build/index.d.ts",
@@ -9,8 +9,9 @@
   ],
   "scripts": {
     "clean": "del ./build/*",
+    "builDev": "tsc",
     "build": "npm run clean && tsc",
-    "pub": "git add . && git commit -m \"Updates\" && npm version patch && npm run build && npm publish"
+    "pub": "git add . && git commit -m \"Updates\" && npm version patch && npm run build && npm publish --access public"
   },
   "keywords": [],
   "author": "",
