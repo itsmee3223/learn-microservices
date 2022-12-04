@@ -1,5 +1,5 @@
 import express, { Request, Response } from 'express';
-import { NotFoundError } from '@cygnetops/common';
+import { NotFoundError } from '@itsme33/common';
 import { Ticket } from '../models/ticket';
 
 const router = express.Router();
