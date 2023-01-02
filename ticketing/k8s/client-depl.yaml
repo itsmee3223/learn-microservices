@@ -15,6 +15,12 @@ spec:
       containers:
         - name: client
           image: cygnetops/ticketing-client
+          env:
+            - name: API_GATEWAY
+              valueFrom:
+                secretKeyRef:
+                  name: api-gateway
+                  key: API_GATEWAY
 ---
 apiVersion: v1
 kind: Service
