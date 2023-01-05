@@ -1,509 +1,76 @@
-## **Section 07: Response Normalization Strategies**
+## **Section 08: Database Management and Modeling**
 
 ## Table of Contents
-- [**Section 07: Response Normalization Strategies**](#section-07-response-normalization-strategies)
+- [**Section 08: Database Management and Modeling**](#section-08-database-management-and-modeling)
 - [Table of Contents](#table-of-contents)
-  - [Creating Route Handlers](#creating-route-handlers)
-  - [Scaffolding Routes](#scaffolding-routes)
-  - [Adding Validation](#adding-validation)
-  - [Handling Validation Errors](#handling-validation-errors)
-  - [Surprising Complexity Around Errors](#surprising-complexity-around-errors)
-  - [Other Sources of Errors](#other-sources-of-errors)
-  - [Solution for Error Handling](#solution-for-error-handling)
-  - [Building an Error Handling Middleware](#building-an-error-handling-middleware)
-  - [Communicating More Info to the Error Handler](#communicating-more-info-to-the-error-handler)
-  - [Encoding More Information In an Error](#encoding-more-information-in-an-error)
-  - [Subclassing for Custom Errors](#subclassing-for-custom-errors)
-  - [Determining Error Type](#determining-error-type)
-  - [Converting Errors to Responses](#converting-errors-to-responses)
-  - [Moving Logic Into Errors](#moving-logic-into-errors)
-  - [Verifying Our Custom Errors](#verifying-our-custom-errors)
-  - [Final Error Related Code](#final-error-related-code)
-  - [How to Define New Custom Errors](#how-to-define-new-custom-errors)
-  - [Uh Oh... Async Error Handling](#uh-oh-async-error-handling)
+  - [Creating Databases in Kubernetes](#creating-databases-in-kubernetes)
+  - [Connecting to MongoDB](#connecting-to-mongodb)
+  - [Understanding the Signup Flow](#understanding-the-signup-flow)
+  - [Getting TypeScript and Mongoose to Cooperate](#getting-typescript-and-mongoose-to-cooperate)
+  - [Creating the User Model](#creating-the-user-model)
+  - [Type Checking User Properties](#type-checking-user-properties)
+  - [Adding Static Properties to a Model](#adding-static-properties-to-a-model)
+  - [Defining Extra Document Properties](#defining-extra-document-properties)
+  - [What's That Angle Bracket For?](#whats-that-angle-bracket-for)
+  - [User Creation](#user-creation)
+  - [Proper Error Handling](#proper-error-handling)
+  - [Reminder on Password Hashing](#reminder-on-password-hashing)
+  - [Adding Password Hashing](#adding-password-hashing)
+  - [Comparing Hashed Password](#comparing-hashed-password)
+  - [Mongoose Pre-Save Hooks](#mongoose-pre-save-hooks)
 
-### Creating Route Handlers
+### Creating Databases in Kubernetes
 
-![](section-05/auth.jpg)
+![](images/auth-1.jpg)
 
-```typescript
-// current-user.ts
-import express from 'express';
-
-const router = express.Router();
-router.get('/api/users/currentuser', () => {});
-
-export { router as currentUserRouter };
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-mongo-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-mongo
+  template:
+    metadata:
+      labels:
+        app: auth-mongo
+    spec:
+      containers:
+        - name: auth-mongo
+          image: mongo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-mongo-srv
+spec:
+  selector:
+    app: auth-mongo
+  ports:
+    - name: db
+      protocol: TCP
+      port: 27017
+      targetPort: 27017
 ```
 
+```console
+cd section-08/ticketing/infra/k8s/
+skaffold dev
+kubectl get pods
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Connecting to MongoDB
+
 ```typescript
-// index.ts
 import express from 'express';
+import 'express-async-errors';
 import { json } from 'body-parser';
-import { currentUserRouter } from './routes/current-user';
-
-const app = express();
-app.use(json());
-app.use(currentUserRouter);
-
-app.listen(3000, () => {
-  console.log('Listening on port 3000!!!!!!!!');
-});
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Scaffolding Routes
-
-```typescript
-// index.ts
-import express from 'express';
-import { json } from 'body-parser';
-
-import { currentUserRouter } from './routes/current-user';
-import { signinRouter } from './routes/signin';
-import { signoutRouter } from './routes/signout';
-import { signupRouter } from './routes/signup';
-
-const app = express();
-app.use(json());
-
-app.use(currentUserRouter);
-app.use(signinRouter);
-app.use(signoutRouter);
-app.use(signupRouter);
-
-app.listen(3000, () => {
-  console.log('Listening on port 3000!');
-});
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Adding Validation
-
-```typescript
-import express, { Request, Response } from 'express';
-import { body } from 'express-validator';
-
-const router = express.Router();
-
-router.post(
-  '/api/users/signup',
-  [
-    body('email')
-      .isEmail()
-      .withMessage('Email must be valid'),
-    body('password')
-      .trim()
-      .isLength({ min: 4, max: 20 })
-      .withMessage('Password must be between 4 and 20 characters')
-  ],
-  (req: Request, res: Response) => {
-    const { email, password } = req.body;
-
-    if (!email || typeof email !== 'string') {
-      res.status(400).send('Provide a valid email');
-    }
-
-    // new User({ email, password })
-  }
-);
-
-export { router as signupRouter };
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Handling Validation Errors
-
-![](images/error.jpg)
-
-```typescript
-import express, { Request, Response } from 'express';
-import { body, validationResult } from 'express-validator';
-
-const router = express.Router();
-
-router.post(
-  '/api/users/signup',
-  [
-    body('email')
-      .isEmail()
-      .withMessage('Email must be valid'),
-    body('password')
-      .trim()
-      .isLength({ min: 4, max: 20 })
-      .withMessage('Password must be between 4 and 20 characters')
-  ],
-  (req: Request, res: Response) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).send(errors.array());
-    }
-
-    const { email, password } = req.body;
-    console.log('Creating a user...')
-    res.send({});
-  }
-);
-
-export { router as signupRouter };
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Surprising Complexity Around Errors
-
-![](images/express-validator.jpg)
-![](images/different-frameworks.jpg)
-![](images/react-different-errors.jpg)
-![](images/handle-error-structure.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Other Sources of Errors
-
-![](images/scenarios.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Solution for Error Handling
-
-| Difficulty in Error Handling                                                                                                      | Solution                                                                                                             |
-| --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| We must have a consistently structured response from all servers, no matter what went wrong                                       | Write an error handling middleware to process errors, give them a consistent structure, and send back to the browser |
-| A billion things can go wrong, not just validation of inputs to a request handler.  Each of these need to be handled consistently | Make sure we capture all possible errors using Express's error handling mechanism (call the 'next' function!)        |
-
-[Error Handling](https://expressjs.com/en/guide/error-handling.html)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Building an Error Handling Middleware
-
-```typescript
-// error-handler.ts
-import { Request, Response, NextFunction } from 'express';
-
-export const errorHandler = (
-  err: Error, 
-  req: Request, 
-  res: Response, 
-  next: NextFunction
-) => {
-  console.log('Something went wrong', err);
-
-  res.status(400).send({
-    message: 'Something went wrong'
-  });
-};
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Communicating More Info to the Error Handler
-
-![](images/error-object.jpg)
-![](images/error-object-2.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Encoding More Information In an Error
-
-- We want an object like an 'Error', but we want to add in some more custom properties to it
-- Usually a sign you want to subclass something!
-- [Custom errors, extending Error](https://javascript.info/custom-errors)
-
-![](images/subclass.jpg)
-![](images/handle-errors-details.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Subclassing for Custom Errors
-
-```typescript
-// request-validation-error.ts
-import { ValidationError } from 'express-validator';
-
-export class RequestValidationError extends Error {
-  constructor(public errors: ValidationError[]) {
-    super();
-
-    // Only because we are extending a built in class
-    Object.setPrototypeOf(this, RequestValidationError.prototype)
-  }
-}
-```
-
-```typescript
-// database-connection-error copy.ts
-export class DatabaseConnectionError extends Error {
-  reason = 'Error connecting to database'
-  
-  constructor() {
-    super();
-
-    // Only because we are extending a built in class
-    Object.setPrototypeOf(this, DatabaseConnectionError.prototype)
-  }
-}
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Determining Error Type
-
-```typescript
-import { Request, Response, NextFunction } from 'express';
-import { RequestValidationError } from '../errors/request-validation-error';
-import { DatabaseConnectionError } from '../errors/database-connection-error copy';
-
-export const errorHandler = (
-  err: Error, 
-  req: Request, 
-  res: Response, 
-  next: NextFunction
-) => {
-  if(err instanceof RequestValidationError) {
-    console.log('handling this error as a request validation error')
-  }
-
-  if(err instanceof DatabaseConnectionError) {
-    console.log('handling this error as a database connection error')
-  }
-
-  res.status(400).send({
-    message: err.message
-  });
-};
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Converting Errors to Responses
-
-![](images/common-response-structure.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Moving Logic Into Errors
-
-![](images/error-handling-issue.jpg)
-![](images/error-handling-solution.jpg)
-
-```typescript
-// database-connection-error.ts
-export class DatabaseConnectionError extends Error {
-  statusCode = 500;
-  reason = 'Error connecting to database'
-
-  constructor() {
-    super();
-
-    // Only because we are extending a built in class
-    Object.setPrototypeOf(this, DatabaseConnectionError.prototype)
-  }
-
-  serializeErrors() {
-    return [{ message: this.reason }];
-  }
-}
-```
-
-```typescript
-// request-validation-error.ts
-import { ValidationError } from 'express-validator';
-
-export class RequestValidationError extends Error {
-  statusCode = 400;
-
-  constructor(public errors: ValidationError[]) {
-    super();
-
-    // Only because we are extending a built in class
-    Object.setPrototypeOf(this, RequestValidationError.prototype)
-  }
-
-  serializeErrors() {
-    return this.errors.map(error => {
-      return { message: error.msg, field: error.param };
-    });
-  }
-}
-```
-
-```typescript
-// error-handler.ts
-import { Request, Response, NextFunction } from 'express';
-import { RequestValidationError } from '../errors/request-validation-error';
-import { DatabaseConnectionError } from '../errors/database-connection-error copy';
-
-export const errorHandler = (
-  err: Error, 
-  req: Request, 
-  res: Response, 
-  next: NextFunction
-) => {
-  if(err instanceof RequestValidationError) {
-    return res.status(err.statusCode).send({ errors: err.serializeErrors() });
-  }
-
-  if(err instanceof DatabaseConnectionError) {
-    return res.status(err.statusCode).send({ errors: err.serializeErrors() });
-  }
-
-  res.status(400).send({
-    errors: [{ message: 'Something went wrong' }]
-  });
-};
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Verifying Our Custom Errors
-
-![](images/verify-custom-error-1.jpg)
-![](images/verify-custom-error-2.jpg)
-![](images/verify-custom-error-option-1.jpg)
-```typescript
-import { ValidationError } from 'express-validator';
-
-interface CustomError {
-  statusCode: number;
-  serializeErrors(): {
-    message: string;
-    field?: string;
-  }[]
-}
-
-export class RequestValidationError extends Error implements CustomError {
-  statusCode = 400;
-
-  constructor(public errors: ValidationError[]) {
-    super();
-
-    // Only because we are extending a built in class
-    Object.setPrototypeOf(this, RequestValidationError.prototype)
-  }
-
-  serializeErrors() {
-    return this.errors.map(error => {
-      return { message: error.msg, field: error.param };
-    });
-  }
-}
-```
-![](images/verify-custom-error-option-2.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Final Error Related Code
-
-```typescript
-// custom-error.ts
-export abstract class CustomError extends Error {
-  abstract statusCode: number;
-
-  constructor(message: string) {
-    super(message);
-
-    Object.setPrototypeOf(this, CustomError.prototype);
-  }
-
-  abstract serializeErrors(): { message: string; field?: string }[];
-}
-```
-
-```typescript
-// database-connection-error.ts
-import { CustomError } from './custom-error';
-
-export class DatabaseConnectionError extends CustomError {
-  statusCode = 500;
-  reason = 'Error connecting to database'
-
-  constructor() {
-    super('Error connecting to db');
-
-    // Only because we are extending a built in class
-    Object.setPrototypeOf(this, DatabaseConnectionError.prototype)
-  }
-
-  serializeErrors() {
-    return [{ message: this.reason }];
-  }
-}
-```
-
-```typescript
-// request-validation-error.ts
-import { ValidationError } from 'express-validator';
-import { CustomError } from './custom-error';
-
-export class RequestValidationError extends CustomError {
-  statusCode = 400;
-
-  constructor(public errors: ValidationError[]) {
-    super('Invalid request parameters');
-
-    // Only because we are extending a built in class
-    Object.setPrototypeOf(this, RequestValidationError.prototype)
-  }
-
-  serializeErrors() {
-    return this.errors.map(error => {
-      return { message: error.msg, field: error.param };
-    });
-  }
-}
-```
-
-```typescript
-// error-handler.ts
-import { Request, Response, NextFunction } from 'express';
-import { CustomError } from '../errors/custom-error';
-
-export const errorHandler = (
-  err: Error, 
-  req: Request, 
-  res: Response, 
-  next: NextFunction
-) => {
-  if(err instanceof CustomError) {
-    return res.status(err.statusCode).send({ errors: err.serializeErrors() });
-  }
-
-  res.status(400).send({
-    errors: [{ message: 'Something went wrong' }]
-  });
-};
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### How to Define New Custom Errors
-
-```typescript
-import { CustomError } from './custom-error';
-
-export class NotFoundError extends CustomError {
-  statusCode = 404;
-
-  constructor() {
-    super('Route not found');
-
-    Object.setPrototypeOf(this, NotFoundError.prototype);
-  }
-
-  serializeErrors() {
-    return [{ message: 'Not Found' }];
-  }
-}
-```
-
-```typescript
-import express from 'express';
-import { json } from 'body-parser';
+import mongoose from 'mongoose';
 
 import { currentUserRouter } from './routes/current-user';
 import { signinRouter } from './routes/signin';
@@ -520,31 +87,367 @@ app.use(signinRouter);
 app.use(signoutRouter);
 app.use(signupRouter);
 
-app.all('*', () => {
+app.all('*', async (req, res) => {
   throw new NotFoundError();
 });
 
 app.use(errorHandler);
 
-app.listen(3000, () => {
-  console.log('Listening on port 3000!');
-});
+const start = async () => {
+  try {
+    await mongoose.connect('mongodb://auth-mongo-srv:27017/auth', {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      useCreateIndex: true
+    });
+    console.log('Connected to MongoDb');
+  } catch (err) {
+    console.log(err);
+  }
+
+  app.listen(3000, () => {
+    console.log('Listening on port 3000!');
+  });
+};
+
+start();
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Uh Oh... Async Error Handling
+### Understanding the Signup Flow
 
+![](images/auth-2.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Getting TypeScript and Mongoose to Cooperate
+
+![](images/mongoose.jpg)
+
+Issue #1 with TS + Mongoose
+
+Creating a new User Document
 ```typescript
-app.all('*', async (req, res, next) => {
-  next(new NotFoundError());
-});
+new User({ email: 'test@test.com', password: 'lk325kj2' })
+// Typescript wants to make sure we are providing the correct properties - Mongoose does not make this easy!
 ```
 
-[ExpressJS Async Errors](https://github.com/davidbanham/express-async-errors)
+Issue #2 with TS + Mongoose
+
 ```typescript
-app.all('*', async (req, res) => {
-  throw new NotFoundError();
+const user = new User({ email: 'test@test.com', password: 'lk325kj2' })
+console.log(user); // { email: '..', password: '..', createdAt: '..', updatedAt: '..' }
+// The properties that we pass to the User constructor don't necessarily match up with the properties available on a user
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Creating the User Model
+
+```typescript
+// user.ts
+import mongoose from 'mongoose';
+
+const userSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true
+  },
+  password: {
+    type: String,
+    required: true
+  }
+});
+
+const User = mongoose.model('User', userSchema);
+
+export { User };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Type Checking User Properties
+
+Solution for Issue #1 with TS + Mongoose
+
+```typescript
+// user.ts
+import mongoose from 'mongoose';
+
+// An interface that describes the properties
+// that are requried to create a new User
+interface UserAttrs {
+  email: string;
+  password: string;
+}
+
+const userSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true
+  },
+  password: {
+    type: String,
+    required: true
+  }
+});
+
+const User = mongoose.model('User', userSchema);
+
+const buildUser = (attrs: UserAttrs) => {
+  return new User(attrs);
+};
+
+export { User, buildUser };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Adding Static Properties to a Model
+
+```typescript
+// user.ts
+import mongoose from 'mongoose';
+
+// An interface that describes the properties
+// that are requried to create a new User
+interface UserAttrs {
+  email: string;
+  password: string;
+}
+
+// An interface that describes the properties
+// that a User Model has
+interface UserModel extends mongoose.Model<any> {
+  build(attrs: UserAttrs): any;
+}
+
+const userSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true
+  },
+  password: {
+    type: String,
+    required: true
+  }
+});
+userSchema.statics.build = (attrs: UserAttrs) => {
+  return new User(attrs);
+};
+
+const User = mongoose.model<any, UserModel>('User', userSchema);
+
+export { User };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Defining Extra Document Properties
+
+Solution for Issue #2 with TS + Mongoose
+
+```typescript
+import mongoose from 'mongoose';
+
+// An interface that describes the properties
+// that are requried to create a new User
+interface UserAttrs {
+  email: string;
+  password: string;
+}
+
+// An interface that describes the properties
+// that a User Model has
+interface UserModel extends mongoose.Model<UserDoc> {
+  build(attrs: UserAttrs): UserDoc;
+}
+
+// An interface that describes the properties
+// that a User Document has
+interface UserDoc extends mongoose.Document {
+  email: string;
+  password: string;
+}
+
+const userSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true
+  },
+  password: {
+    type: String,
+    required: true
+  }
+});
+userSchema.statics.build = (attrs: UserAttrs) => {
+  return new User(attrs);
+};
+
+const User = mongoose.model<UserDoc, UserModel>('User', userSchema);
+
+export { User };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### What's That Angle Bracket For?
+
+```typescript
+// index.d.ts
+export function model<T extends Document, U extends Model<T>>(
+  name: string,
+  schema?: Schema,
+  collection?: string,
+  skipInit?: boolean
+): U;
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### User Creation
+
+```typescript
+// signup.ts
+import express, { Request, Response } from 'express';
+import { body, validationResult } from 'express-validator';
+import { User } from '../models/user';
+import { RequestValidationError } from '../errors/request-validation-error';
+
+const router = express.Router();
+
+router.post(
+  '/api/users/signup',
+  [
+    body('email')
+      .isEmail()
+      .withMessage('Email must be valid'),
+    body('password')
+      .trim()
+      .isLength({ min: 4, max: 20 })
+      .withMessage('Password must be between 4 and 20 characters')
+  ],
+  async (req: Request, res: Response) => {
+    const errors = validationResult(req);
+
+    if (!errors.isEmpty()) {
+      throw new RequestValidationError(errors.array());
+    }
+
+    const { email, password } = req.body;
+
+    const existingUser = await User.findOne({ email });
+
+    if (existingUser) {
+      console.log('Email in use');
+      return res.send({});
+    }
+
+    const user = User.build({ email, password });
+    await user.save();
+
+    res.status(201).send(user);
+  }
+);
+
+export { router as signupRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Proper Error Handling
+
+```typescript
+// bad-request-error.ts
+import { CustomError } from './custom-error';
+
+export class BadRequestError extends CustomError {
+  statusCode = 400;
+
+  constructor(public message: string) {
+    super(message);
+
+    Object.setPrototypeOf(this, BadRequestError.prototype);
+  }
+
+  serializeErrors() {
+    return [{ message: this.message }];
+  }
+}
+```
+
+```typescript
+// signup.ts
+if (existingUser) {
+  throw new BadRequestError('Email in use');
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Reminder on Password Hashing
+
+![](images/signup-hashing-1.jpg)
+![](images/signup-hashing-2.jpg)
+![](images/signin-hashing.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Adding Password Hashing
+
+```typescript
+// password.ts
+import { scrypt, randomBytes } from 'crypto';
+import { promisify } from 'util';
+
+// convert callback scrypt function to async await use
+const scryptAsync = promisify(scrypt);
+
+export class Password {
+  static async toHash(password: string) {
+    const salt = randomBytes(8).toString('hex');
+    const buf = (await scryptAsync(password, salt, 64)) as Buffer;
+
+    return `${buf.toString('hex')}.${salt}`;
+  }
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Comparing Hashed Password
+
+```typescript
+// password.ts
+import { scrypt, randomBytes } from 'crypto';
+import { promisify } from 'util';
+
+// convert callback scrypt function to async await use
+const scryptAsync = promisify(scrypt);
+
+export class Password {
+  static async compare(storedPassword: string, suppliedPassword: string) {
+    const [hashedPassword, salt] = storedPassword.split('.');
+    const buf = (await scryptAsync(suppliedPassword, salt, 64)) as Buffer;
+
+    return buf.toString('hex') === hashedPassword;
+  }
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Mongoose Pre-Save Hooks
+
+```typescript
+// user.ts
+userSchema.pre('save', async function(done) {
+  if (this.isModified('password')) {
+    const hashed = await Password.toHash(this.get('password'));
+    this.set('password', hashed);
+  }
+  done(); // complete async work
 });
 ```
 
