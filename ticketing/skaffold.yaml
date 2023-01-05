@@ -8,7 +8,7 @@ build:
   local:
     push: false
   artifacts:
-    - image: /auth
+    - image: username/auth
       context: auth
       docker:
         dockerfile: Dockerfile

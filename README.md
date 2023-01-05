@@ -1,454 +1,636 @@
-## **Section 08: Database Management and Modeling**
+## **Section 09: Authentication Strategies and Options**
 
 ## Table of Contents
-- [**Section 08: Database Management and Modeling**](#section-08-database-management-and-modeling)
+- [**Section 09: Authentication Strategies and Options**](#section-09-authentication-strategies-and-options)
 - [Table of Contents](#table-of-contents)
-  - [Creating Databases in Kubernetes](#creating-databases-in-kubernetes)
-  - [Connecting to MongoDB](#connecting-to-mongodb)
-  - [Understanding the Signup Flow](#understanding-the-signup-flow)
-  - [Getting TypeScript and Mongoose to Cooperate](#getting-typescript-and-mongoose-to-cooperate)
-  - [Creating the User Model](#creating-the-user-model)
-  - [Type Checking User Properties](#type-checking-user-properties)
-  - [Adding Static Properties to a Model](#adding-static-properties-to-a-model)
-  - [Defining Extra Document Properties](#defining-extra-document-properties)
-  - [What's That Angle Bracket For?](#whats-that-angle-bracket-for)
-  - [User Creation](#user-creation)
-  - [Proper Error Handling](#proper-error-handling)
-  - [Reminder on Password Hashing](#reminder-on-password-hashing)
-  - [Adding Password Hashing](#adding-password-hashing)
-  - [Comparing Hashed Password](#comparing-hashed-password)
-  - [Mongoose Pre-Save Hooks](#mongoose-pre-save-hooks)
+  - [Fundamental Authentication Strategies](#fundamental-authentication-strategies)
+  - [Huge Issues with Authentication Strategies](#huge-issues-with-authentication-strategies)
+  - [So Which Option?](#so-which-option)
+  - [Solving Issues with Option #2](#solving-issues-with-option-2)
+  - [Reminder on Cookies vs JWT's](#reminder-on-cookies-vs-jwts)
+  - [Microservices Auth Requirements](#microservices-auth-requirements)
+  - [Issues with JWT's and Server Side Rendering](#issues-with-jwts-and-server-side-rendering)
+  - [Cookies and Encryption](#cookies-and-encryption)
+  - [Adding Session Support](#adding-session-support)
+  - [Note on Cookie-Session - Do Not Skip](#note-on-cookie-session---do-not-skip)
+  - [Generating a JWT](#generating-a-jwt)
+  - [JWT Signing Keys](#jwt-signing-keys)
+  - [Securely Storing Secrets with Kubernetes](#securely-storing-secrets-with-kubernetes)
+  - [Creating and Accessing Secrets](#creating-and-accessing-secrets)
+  - [Accessing Env Variables in a Pod](#accessing-env-variables-in-a-pod)
+  - [Common Response Properties](#common-response-properties)
+  - [Formatting JSON Properties](#formatting-json-properties)
+  - [The Signin Flow](#the-signin-flow)
+  - [Common Request Validation Middleware](#common-request-validation-middleware)
+  - [Sign In Logic](#sign-in-logic)
+  - [Current User Handler](#current-user-handler)
+  - [Returning the Current User](#returning-the-current-user)
+  - [Signing Out](#signing-out)
+  - [Creating a Current User Middleware](#creating-a-current-user-middleware)
+  - [Augmenting Type Definitions](#augmenting-type-definitions)
+  - [Requiring Auth for Route Access](#requiring-auth-for-route-access)
 
-### Creating Databases in Kubernetes
-
-![](images/auth-1.jpg)
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: auth-mongo-depl
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: auth-mongo
-  template:
-    metadata:
-      labels:
-        app: auth-mongo
-    spec:
-      containers:
-        - name: auth-mongo
-          image: mongo
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: auth-mongo-srv
-spec:
-  selector:
-    app: auth-mongo
-  ports:
-    - name: db
-      protocol: TCP
-      port: 27017
-      targetPort: 27017
-```
-
-```console
-cd section-08/ticketing/infra/k8s/
-skaffold dev
-kubectl get pods
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Connecting to MongoDB
-
-```typescript
-import express from 'express';
-import 'express-async-errors';
-import { json } from 'body-parser';
-import mongoose from 'mongoose';
-
-import { currentUserRouter } from './routes/current-user';
-import { signinRouter } from './routes/signin';
-import { signoutRouter } from './routes/signout';
-import { signupRouter } from './routes/signup';
-import { errorHandler } from './middleware/error-handler';
-import { NotFoundError } from './errors/not-found-error';
-
-const app = express();
-app.use(json());
-
-app.use(currentUserRouter);
-app.use(signinRouter);
-app.use(signoutRouter);
-app.use(signupRouter);
-
-app.all('*', async (req, res) => {
-  throw new NotFoundError();
-});
-
-app.use(errorHandler);
-
-const start = async () => {
-  try {
-    await mongoose.connect('mongodb://auth-mongo-srv:27017/auth', {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      useCreateIndex: true
-    });
-    console.log('Connected to MongoDb');
-  } catch (err) {
-    console.log(err);
-  }
-
-  app.listen(3000, () => {
-    console.log('Listening on port 3000!');
-  });
-};
-
-start();
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Understanding the Signup Flow
+### Fundamental Authentication Strategies
 
 ![](images/auth-2.jpg)
 
-**[⬆ back to top](#table-of-contents)**
+- User auth with microservices is an unsolved problem
+- There are many ways to do it, and no one way is "right"
+- I am going to outline a couple solutions then propose a solution that works, but still has downsides
 
-### Getting TypeScript and Mongoose to Cooperate
-
-![](images/mongoose.jpg)
-
-Issue #1 with TS + Mongoose
-
-Creating a new User Document
-```typescript
-new User({ email: 'test@test.com', password: 'lk325kj2' })
-// Typescript wants to make sure we are providing the correct properties - Mongoose does not make this easy!
-```
-
-Issue #2 with TS + Mongoose
-
-```typescript
-const user = new User({ email: 'test@test.com', password: 'lk325kj2' })
-console.log(user); // { email: '..', password: '..', createdAt: '..', updatedAt: '..' }
-// The properties that we pass to the User constructor don't necessarily match up with the properties available on a user
-```
+![](images/order-service.jpg)
+![](images/option-1.jpg)
+![](images/option-1-1.jpg)
+![](images/option-2.jpg)
 
 **[⬆ back to top](#table-of-contents)**
 
-### Creating the User Model
+### Huge Issues with Authentication Strategies
 
-```typescript
-// user.ts
-import mongoose from 'mongoose';
-
-const userSchema = new mongoose.Schema({
-  email: {
-    type: String,
-    required: true
-  },
-  password: {
-    type: String,
-    required: true
-  }
-});
-
-const User = mongoose.model('User', userSchema);
-
-export { User };
-```
+![](images/user-signin.jpg)
+![](images/option-2.jpg)
+![](images/admin-ban-user.jpg)
+![](images/ban-user-can-buy-ticket.jpg)
 
 **[⬆ back to top](#table-of-contents)**
 
-### Type Checking User Properties
+### So Which Option?
 
-Solution for Issue #1 with TS + Mongoose
+Fundamental Option #1
 
-```typescript
-// user.ts
-import mongoose from 'mongoose';
+- Individual services rely on the auth service
+- Changes to auth state are immediately reflected
+- Auth service goes down?  Entire app is broken
 
-// An interface that describes the properties
-// that are requried to create a new User
-interface UserAttrs {
-  email: string;
-  password: string;
-}
+Fundamental Option #2
 
-const userSchema = new mongoose.Schema({
-  email: {
-    type: String,
-    required: true
-  },
-  password: {
-    type: String,
-    required: true
-  }
-});
+- Individual services know how to authenticate a user
+- Auth service is down? Who cares!
+- Some user got banned? Darn, I just gave them the keys to my car 5 minutes ago...
 
-const User = mongoose.model('User', userSchema);
-
-const buildUser = (attrs: UserAttrs) => {
-  return new User(attrs);
-};
-
-export { User, buildUser };
-```
+We are going with Option #2 to stick with the idea of independent services
 
 **[⬆ back to top](#table-of-contents)**
 
-### Adding Static Properties to a Model
+### Solving Issues with Option #2
 
-```typescript
-// user.ts
-import mongoose from 'mongoose';
-
-// An interface that describes the properties
-// that are requried to create a new User
-interface UserAttrs {
-  email: string;
-  password: string;
-}
-
-// An interface that describes the properties
-// that a User Model has
-interface UserModel extends mongoose.Model<any> {
-  build(attrs: UserAttrs): any;
-}
-
-const userSchema = new mongoose.Schema({
-  email: {
-    type: String,
-    required: true
-  },
-  password: {
-    type: String,
-    required: true
-  }
-});
-userSchema.statics.build = (attrs: UserAttrs) => {
-  return new User(attrs);
-};
-
-const User = mongoose.model<any, UserModel>('User', userSchema);
-
-export { User };
-```
+![](images/user-signin-time-constraint.jpg)
+![](images/refresh-token-1.jpg)
+![](images/refresh-token-2.jpg)
+![](images/cache-banned-users.jpg)
 
 **[⬆ back to top](#table-of-contents)**
 
-### Defining Extra Document Properties
+### Reminder on Cookies vs JWT's
 
-Solution for Issue #2 with TS + Mongoose
+![](images/option-2.jpg)
+![](images/cookie.jpg)
+![](images/jwt.jpg)
+
+| Cookies                                           | JWT's                                  |
+| ------------------------------------------------- | -------------------------------------- |
+| Transport mechanism                               | Authentication/Authorization mechanism |
+| Moves any kind of data between browser and server | Stores any data we want                |
+| Automatically managed by the browser              | We have to manage it manually          |
+
+**[⬆ back to top](#table-of-contents)**
+
+### Microservices Auth Requirements
+
+![](images/login-user-details.jpg)
+![](images/admin-ban-user.jpg)
+![](images/login-expire.jpg)
+![](images/auth-mechanism.jpg)
+
+Requirements for Our Auth Mechanism -> JWT
+
+- Must be able to tell us details about a user
+- Must be able to handle authorization info
+- Must have a built-in, tamper-resistant way to expire or - invalidate itself
+- Must be easily understood between different languages
+- Must not require some kind of backing data store on the server
+
+![](images/client-jwt-server.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Issues with JWT's and Server Side Rendering
+
+![](images/requests-responses.jpg)
+![](images/ssr-1.jpg)
+![](images/ssr-2.jpg)
+![](images/ssr-3.jpg)
+![](images/jwt-in-cookie.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Cookies and Encryption
+
+![](images/signup.jpg)
+
+Requirements for Our Auth Mechanism
+
+- Must be able to tell us details about a user
+- Must be able to handle authorization info
+- Must have a built-in, tamper-resistant way to expire or - invalidate itself
+- Must be easily understood between different languages
+  - Cookie handling across languages is usually an issue when we encrypt the data in the cookie
+  - We will not encrypt the cookie contents.
+  - Remember, JWT's are tamper resistant
+  - You can encrypt the cookie contents if this is a big deal to you
+- Must not require some kind of backing data store on the server
+
+**[⬆ back to top](#table-of-contents)**
+
+### Adding Session Support
+
+[cookie-session](https://github.com/expressjs/cookie-session)
 
 ```typescript
-import mongoose from 'mongoose';
-
-// An interface that describes the properties
-// that are requried to create a new User
-interface UserAttrs {
-  email: string;
-  password: string;
-}
-
-// An interface that describes the properties
-// that a User Model has
-interface UserModel extends mongoose.Model<UserDoc> {
-  build(attrs: UserAttrs): UserDoc;
-}
-
-// An interface that describes the properties
-// that a User Document has
-interface UserDoc extends mongoose.Document {
-  email: string;
-  password: string;
-}
-
-const userSchema = new mongoose.Schema({
-  email: {
-    type: String,
-    required: true
-  },
-  password: {
-    type: String,
-    required: true
-  }
-});
-userSchema.statics.build = (attrs: UserAttrs) => {
-  return new User(attrs);
-};
-
-const User = mongoose.model<UserDoc, UserModel>('User', userSchema);
-
-export { User };
+// index.ts
+app.set('trust proxy', true);
+app.use(json());
+app.use(
+  cookieSession({
+    signed: false,
+    secure: true
+  })
+);
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### What's That Angle Bracket For?
+### Note on Cookie-Session - Do Not Skip
 
-```typescript
-// index.d.ts
-export function model<T extends Document, U extends Model<T>>(
-  name: string,
-  schema?: Schema,
-  collection?: string,
-  skipInit?: boolean
-): U;
+The latest version of the @types/cookie-session package has a bug in it! Yes, a real bug - the type defs written out incorrectly describes the session object.
+
+To fix this, we'll use a slightly earlier version of the package until this bug gets fixed.
+
+Run the following inside the auth project:
+
+```console
+npm uninstall @types/cookie-session
+npm install --save-exact @types/cookie-session@2.0.39
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### User Creation
+### Generating a JWT
+
+[jsonwebtoken](https://github.com/auth0/node-jsonwebtoken)
 
 ```typescript
 // signup.ts
+// Generate JWT
+const userJwt = jwt.sign(
+  {
+    id: user.id,
+    email: user.email
+  },
+  'asdf'
+);
+
+// Store it on session object
+req.session = {
+  jwt: userJwt
+};
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### JWT Signing Keys
+
+[BASE64 Decode](https://www.base64decode.org/)
+[JWT](https://jwt.io/)
+
+![](images/sign-jwt.jpg)
+![](images/jwt-signing-key.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Securely Storing Secrets with Kubernetes
+
+![](images/secret-object-1.jpg)
+![](images/secret-object-2.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Creating and Accessing Secrets
+
+Creating a Secret
+
+```console
+kubectl create secret generic jwt-secret --from-literal=JWT_KEY=asdf
+kubectl get secrets
+kubectl describe secret jwt-secret
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Accessing Env Variables in a Pod
+
+```typescript
+if(!process.env.JWT_KEY) {
+  throw new Error('JWT_KEY must be defined');
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Common Response Properties
+
+![](images/different-db-issue.jpg)
+![](images/different-db-solution.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Formatting JSON Properties
+
+```typescript
+const person = { name: 'alex' };
+JSON.stringify(person)
+
+const personTwo = { 
+  name: 'alex', 
+  toJSON() { return 1; } 
+};
+JSON.stringify(personTwo)
+```
+
+```typescript
+const userSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true
+  },
+  password: {
+    type: String,
+    required: true
+  }
+}, {
+  toJSON: {
+    transform(doc, ret) {
+      ret.id = ret._id;
+      delete ret._id;
+      delete ret.password;
+      delete ret.__v;
+    }
+  }
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### The Signin Flow
+
+![](images/signin-flow.jpg)
+
+```typescript
 import express, { Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
-import { User } from '../models/user';
+
 import { RequestValidationError } from '../errors/request-validation-error';
 
 const router = express.Router();
 
 router.post(
-  '/api/users/signup',
+  '/api/users/signin',
   [
     body('email')
       .isEmail()
       .withMessage('Email must be valid'),
     body('password')
       .trim()
-      .isLength({ min: 4, max: 20 })
-      .withMessage('Password must be between 4 and 20 characters')
+      .notEmpty()
+      .withMessage('You must supply a password')
   ],
-  async (req: Request, res: Response) => {
+  (req: Request, res: Response) => {
     const errors = validationResult(req);
 
     if (!errors.isEmpty()) {
       throw new RequestValidationError(errors.array());
     }
-
-    const { email, password } = req.body;
-
-    const existingUser = await User.findOne({ email });
-
-    if (existingUser) {
-      console.log('Email in use');
-      return res.send({});
-    }
-
-    const user = User.build({ email, password });
-    await user.save();
-
-    res.status(201).send(user);
   }
 );
 
-export { router as signupRouter };
+export { router as signinRouter };
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Proper Error Handling
+### Common Request Validation Middleware
 
 ```typescript
-// bad-request-error.ts
+// validate-request.ts
+import { Request, Response, NextFunction } from 'express';
+import { validationResult } from 'express-validator';
+import { RequestValidationError } from '../errors/request-validation-error';
+
+export const validateRequest = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  const errors = validationResult(req);
+
+  if (!errors.isEmpty()) {
+    throw new RequestValidationError(errors.array());
+  }
+
+  next();
+};
+```
+
+```typescript
+// signin.ts
+import express, { Request, Response } from 'express';
+import { body } from 'express-validator';
+
+import { validateRequest } from '../middleware/validate-request';
+
+const router = express.Router();
+
+router.post(
+  '/api/users/signin',
+  [
+    body('email')
+      .isEmail()
+      .withMessage('Email must be valid'),
+    body('password')
+      .trim()
+      .notEmpty()
+      .withMessage('You must supply a password')
+  ],
+  validateRequest,
+  (req: Request, res: Response) => {
+
+  }
+);
+
+export { router as signinRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Sign In Logic
+
+![](images/signin-flow.jpg)
+
+```typescript
+import express, { Request, Response } from 'express';
+import { body } from 'express-validator';
+import jwt from 'jsonwebtoken';
+
+import { Password } from '../services/password';
+import { User } from '../models/user';
+import { validateRequest } from '../middlewares/validate-request';
+import { BadRequestError } from '../errors/bad-request-error';
+
+const router = express.Router();
+
+router.post(
+  '/api/users/signin',
+  [
+    body('email')
+      .isEmail()
+      .withMessage('Email must be valid'),
+    body('password')
+      .trim()
+      .notEmpty()
+      .withMessage('You must supply a password')
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    const { email, password } = req.body;
+
+    const existingUser = await User.findOne({ email });
+    if (!existingUser) {
+      throw new BadRequestError('Invalid credentials');
+    }
+
+    const passwordsMatch = await Password.compare(
+      existingUser.password,
+      password
+    );
+    if (!passwordsMatch) {
+      throw new BadRequestError('Invalid Credentials');
+    }
+
+    // Generate JWT
+    const userJwt = jwt.sign(
+      {
+        id: existingUser.id,
+        email: existingUser.email
+      },
+      process.env.JWT_KEY!
+    );
+
+    // Store it on session object
+    req.session = {
+      jwt: userJwt
+    };
+
+    res.status(200).send(existingUser);
+  }
+);
+
+export { router as signinRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Current User Handler
+
+![](images/current-user.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Returning the Current User
+
+```typescript
+import express from 'express';
+import jwt from 'jsonwebtoken';
+
+const router = express.Router();
+
+router.get('/api/users/currentuser', (req, res) => {
+  if (!req.session?.jwt) {
+    return res.send({ currentUser: null });
+  }
+
+  try {
+    const payload = jwt.verify(
+      req.session.jwt, 
+      process.env.JWT_KEY!
+    );
+    res.send({ currentUser: payload });
+  } catch (err) {
+    res.send({ currentUser: null });
+  }
+});
+
+export { router as currentUserRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Signing Out
+
+```typescript
+import express from 'express';
+
+const router = express.Router();
+
+router.post('/api/users/signout', (req, res) => {
+  req.session = null;
+
+  res.send({});
+});
+
+export { router as signoutRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Creating a Current User Middleware
+
+```typescript
+// current-user.ts
+import { Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+
+export const currentUser = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  if (!req.session?.jwt) {
+    return next();
+  }
+
+  try {
+    const payload = jwt.verify(req.session.jwt, process.env.JWT_KEY!);
+    req.currentUser = payload;
+  } catch (err) {}
+
+  next();
+};
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Augmenting Type Definitions
+
+```typescript
+import { Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+
+interface UserPayload {
+  id: string;
+  email: string;
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      currentUser?: UserPayload;
+    }
+  }
+}
+
+export const currentUser = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  if (!req.session?.jwt) {
+    return next();
+  }
+
+  try {
+    const payload = jwt.verify(
+      req.session.jwt,
+      process.env.JWT_KEY!
+    ) as UserPayload;
+    req.currentUser = payload;
+  } catch (err) {}
+
+  next();
+};
+```
+
+```typescript
+import express from 'express';
+import jwt from 'jsonwebtoken';
+
+import { currentUser } from '../middlewares/current-user';
+
+const router = express.Router();
+
+router.get('/api/users/currentuser', currentUser, (req, res) => {
+  res.send({ currentUser: req.currentUser || null });
+});
+
+export { router as currentUserRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Requiring Auth for Route Access
+
+```typescript
 import { CustomError } from './custom-error';
 
-export class BadRequestError extends CustomError {
-  statusCode = 400;
+export class NotAuthorizedError extends CustomError {
+  statusCode = 401;
 
-  constructor(public message: string) {
-    super(message);
+  constructor() {
+    super('Not Authorized');
 
-    Object.setPrototypeOf(this, BadRequestError.prototype);
+    Object.setPrototypeOf(this, NotAuthorizedError.prototype);
   }
 
   serializeErrors() {
-    return [{ message: this.message }];
+    return [{ message: 'Not authorized' }];
   }
 }
 ```
 
 ```typescript
-// signup.ts
-if (existingUser) {
-  throw new BadRequestError('Email in use');
-}
+import { Request, Response, NextFunction } from 'express';
+import { NotAuthorizedError } from '../errors/not-authorized-error';
+
+export const requireAuth = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  if (!req.currentUser) {
+    throw new NotAuthorizedError();
+  }
+
+  next();
+};
 ```
 
-**[⬆ back to top](#table-of-contents)**
-
-### Reminder on Password Hashing
-
-![](images/signup-hashing-1.jpg)
-![](images/signup-hashing-2.jpg)
-![](images/signin-hashing.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Adding Password Hashing
-
 ```typescript
-// password.ts
-import { scrypt, randomBytes } from 'crypto';
-import { promisify } from 'util';
+import express from 'express';
+import jwt from 'jsonwebtoken';
 
-// convert callback scrypt function to async await use
-const scryptAsync = promisify(scrypt);
+import { currentUser } from '../middlewares/current-user';
+import { requireAuth } from '../middlewares/require-auth';
 
-export class Password {
-  static async toHash(password: string) {
-    const salt = randomBytes(8).toString('hex');
-    const buf = (await scryptAsync(password, salt, 64)) as Buffer;
+const router = express.Router();
 
-    return `${buf.toString('hex')}.${salt}`;
-  }
-}
-```
+router.get(
+  '/api/users/currentuser', 
+  currentUser, 
+  requireAuth, 
+  (req, res) => {
+    res.send({ currentUser: req.currentUser || null });
+  });
 
-**[⬆ back to top](#table-of-contents)**
-
-### Comparing Hashed Password
-
-```typescript
-// password.ts
-import { scrypt, randomBytes } from 'crypto';
-import { promisify } from 'util';
-
-// convert callback scrypt function to async await use
-const scryptAsync = promisify(scrypt);
-
-export class Password {
-  static async compare(storedPassword: string, suppliedPassword: string) {
-    const [hashedPassword, salt] = storedPassword.split('.');
-    const buf = (await scryptAsync(suppliedPassword, salt, 64)) as Buffer;
-
-    return buf.toString('hex') === hashedPassword;
-  }
-}
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Mongoose Pre-Save Hooks
-
-```typescript
-// user.ts
-userSchema.pre('save', async function(done) {
-  if (this.isModified('password')) {
-    const hashed = await Password.toHash(this.get('password'));
-    this.set('password', hashed);
-  }
-  done(); // complete async work
-});
+export { router as currentUserRouter };
 ```
 
 **[⬆ back to top](#table-of-contents)**
