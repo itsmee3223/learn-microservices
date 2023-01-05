@@ -1,141 +1,551 @@
-## **Section 05: Architecture of Multi-Service Apps**
+## **Section 07: Response Normalization Strategies**
 
 ## Table of Contents
-- [**Section 05: Architecture of Multi-Service Apps**](#section-05-architecture-of-multi-service-apps)
+- [**Section 07: Response Normalization Strategies**](#section-07-response-normalization-strategies)
 - [Table of Contents](#table-of-contents)
-  - [Big Ticket Items](#big-ticket-items)
-  - [Ticketing App Overview](#ticketing-app-overview)
-  - [Resource Types](#resource-types)
-  - [Service Types](#service-types)
-  - [Events and Architecture Design](#events-and-architecture-design)
-  - [Auth Service Setup](#auth-service-setup)
-  - [Auth K8s Setup](#auth-k8s-setup)
-  - [Adding Skaffold](#adding-skaffold)
-  - [Ingress-Nginx Setup](#ingress-nginx-setup)
-  - [Hosts File and Security Warning](#hosts-file-and-security-warning)
+  - [Creating Route Handlers](#creating-route-handlers)
+  - [Scaffolding Routes](#scaffolding-routes)
+  - [Adding Validation](#adding-validation)
+  - [Handling Validation Errors](#handling-validation-errors)
+  - [Surprising Complexity Around Errors](#surprising-complexity-around-errors)
+  - [Other Sources of Errors](#other-sources-of-errors)
+  - [Solution for Error Handling](#solution-for-error-handling)
+  - [Building an Error Handling Middleware](#building-an-error-handling-middleware)
+  - [Communicating More Info to the Error Handler](#communicating-more-info-to-the-error-handler)
+  - [Encoding More Information In an Error](#encoding-more-information-in-an-error)
+  - [Subclassing for Custom Errors](#subclassing-for-custom-errors)
+  - [Determining Error Type](#determining-error-type)
+  - [Converting Errors to Responses](#converting-errors-to-responses)
+  - [Moving Logic Into Errors](#moving-logic-into-errors)
+  - [Verifying Our Custom Errors](#verifying-our-custom-errors)
+  - [Final Error Related Code](#final-error-related-code)
+  - [How to Define New Custom Errors](#how-to-define-new-custom-errors)
+  - [Uh Oh... Async Error Handling](#uh-oh-async-error-handling)
 
-### Big Ticket Items
+### Creating Route Handlers
 
-Lessons from App #1
+![](section-05/auth.jpg)
 
-- The big challenge in microservices is data
-- Different ways to share data between services.  We are going to focus on async communication
-- Async communication focuses on communicating changes using events sent to an event bus
-- Async communication encourages each service to be 100% self-sufficient.  Relatively easy to handle temporary downtime or new service creation
-- Docker makes it easier to package up services
-- Kubernetes is a pain to setup, but makes it really easy to deploy + scale services
+```typescript
+// current-user.ts
+import express from 'express';
 
-| Painful Things from App #1                                                                                        | Solutions!                                                                            |
-| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Lots of duplicated code!                                                                                          | Build a central library as an NPM module to share code between our different projects |
-| Really hard to picture the flow of events between services                                                        | Precisely define all of our events in this shared library.                            |
-| Really hard to remember what properties an event should have                                                      | Write everything in Typescript.                                                       |
-| Really hard to test some event flows                                                                              | Write tests for as much as possible/reasonable                                        |
-| My machine is getting laggy running kubernetes and everything else...                                             | Run a k8s cluster in the cloud and develop on it almost as quickly as localz          |
-| What if someone created a comment after editing 5 others after editing a post while balancing on a tight rope.... | Introduce a lot of code to handle concurrency issues                                  |
+const router = express.Router();
+router.get('/api/users/currentuser', () => {});
 
-**[⬆ back to top](#table-of-contents)**
+export { router as currentUserRouter };
+```
 
-### Ticketing App Overview
+```typescript
+// index.ts
+import express from 'express';
+import { json } from 'body-parser';
+import { currentUserRouter } from './routes/current-user';
 
-- Users can list a ticket for an event (concert, sports) for sale
-- Other users can purchase this ticket
-- Any user can list tickets for sale and purchase tickets
-- When a user attempts to purchase a ticket, the ticket is 'locked' for 15 minutes.  The user has 15 minutes to enter their payment info.
-- While locked, no other user can purchase the ticket. After 15 minutes, the ticket should 'unlock'
-- Ticket prices can be edited if they are not locked
+const app = express();
+app.use(json());
+app.use(currentUserRouter);
 
-![](images/app-1.jpg)
-![](images/app-2.jpg)
-![](images/app-3.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Resource Types
-
-![](images/resource-types.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Service Types
-
-![](images/service-types.jpg)
-
-- We are creating a separate service to manage each type of resource
-- Should we do this for every microservices app?
-- Probably not? Depends on your use case, number of resources, business logic tied to each resource, etc
-- Perhaps 'feature-based' design would be better
-
-**[⬆ back to top](#table-of-contents)**
-
-### Events and Architecture Design
-
-![](images/events.jpg)
-![](images/architecture-design.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Auth Service Setup
-
-![](images/auth.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Auth K8s Setup
-
-```console
-cd sections-05/ticketing/auth/
-docker build -t username/auth .
-docker login
-docker push username/auth
-cd ../infra/k8s/
-kubectl apply -f auth-depl.yaml
-kubectl rollout restart deployment auth-depl
-kubectl get deployment
-kubectl get pod
-kubectl logs auth-depl-7c7879db66-mwz79
-kubectl describe pod auth-depl-7c7879db66-mwz79
-kubectl exec -it auth-depl-7c7879db66-mwz79 -- cat index.js
-kubectl get services
+app.listen(3000, () => {
+  console.log('Listening on port 3000!!!!!!!!');
+});
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Adding Skaffold
+### Scaffolding Routes
 
-See ticketing/skaffold.yaml
+```typescript
+// index.ts
+import express from 'express';
+import { json } from 'body-parser';
 
-```console
-cd section-05/ticketing/
-skaffold dev
+import { currentUserRouter } from './routes/current-user';
+import { signinRouter } from './routes/signin';
+import { signoutRouter } from './routes/signout';
+import { signupRouter } from './routes/signup';
+
+const app = express();
+app.use(json());
+
+app.use(currentUserRouter);
+app.use(signinRouter);
+app.use(signoutRouter);
+app.use(signupRouter);
+
+app.listen(3000, () => {
+  console.log('Listening on port 3000!');
+});
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Ingress-Nginx Setup
+### Adding Validation
 
-```console
-kubectl get ingress
-kubectl describe ingress ingress-service
+```typescript
+import express, { Request, Response } from 'express';
+import { body } from 'express-validator';
+
+const router = express.Router();
+
+router.post(
+  '/api/users/signup',
+  [
+    body('email')
+      .isEmail()
+      .withMessage('Email must be valid'),
+    body('password')
+      .trim()
+      .isLength({ min: 4, max: 20 })
+      .withMessage('Password must be between 4 and 20 characters')
+  ],
+  (req: Request, res: Response) => {
+    const { email, password } = req.body;
+
+    if (!email || typeof email !== 'string') {
+      res.status(400).send('Provide a valid email');
+    }
+
+    // new User({ email, password })
+  }
+);
+
+export { router as signupRouter };
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Hosts File and Security Warning
+### Handling Validation Errors
 
-Hosts File
+![](images/error.jpg)
 
-| OS          | Host File Location                    |
-| ----------- | ------------------------------------- |
-| Windows     | C:\Windows\System32\Drivers\etc\hosts |
-| MacOS/Linux | /etc/hosts                            |
+```typescript
+import express, { Request, Response } from 'express';
+import { body, validationResult } from 'express-validator';
 
-Add 127.0.0.1 ticketing.dev to hosts file
+const router = express.Router();
 
-Security Warning
+router.post(
+  '/api/users/signup',
+  [
+    body('email')
+      .isEmail()
+      .withMessage('Email must be valid'),
+    body('password')
+      .trim()
+      .isLength({ min: 4, max: 20 })
+      .withMessage('Password must be between 4 and 20 characters')
+  ],
+  (req: Request, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).send(errors.array());
+    }
 
-- Goto Chrome - https://ticketing.dev/api/users/currentuser
-- Unskippable HTTPS warning in Chrome? 
-  - type thisisunsafe
+    const { email, password } = req.body;
+    console.log('Creating a user...')
+    res.send({});
+  }
+);
+
+export { router as signupRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Surprising Complexity Around Errors
+
+![](images/express-validator.jpg)
+![](images/different-frameworks.jpg)
+![](images/react-different-errors.jpg)
+![](images/handle-error-structure.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Other Sources of Errors
+
+![](images/scenarios.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Solution for Error Handling
+
+| Difficulty in Error Handling                                                                                                      | Solution                                                                                                             |
+| --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| We must have a consistently structured response from all servers, no matter what went wrong                                       | Write an error handling middleware to process errors, give them a consistent structure, and send back to the browser |
+| A billion things can go wrong, not just validation of inputs to a request handler.  Each of these need to be handled consistently | Make sure we capture all possible errors using Express's error handling mechanism (call the 'next' function!)        |
+
+[Error Handling](https://expressjs.com/en/guide/error-handling.html)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Building an Error Handling Middleware
+
+```typescript
+// error-handler.ts
+import { Request, Response, NextFunction } from 'express';
+
+export const errorHandler = (
+  err: Error, 
+  req: Request, 
+  res: Response, 
+  next: NextFunction
+) => {
+  console.log('Something went wrong', err);
+
+  res.status(400).send({
+    message: 'Something went wrong'
+  });
+};
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Communicating More Info to the Error Handler
+
+![](images/error-object.jpg)
+![](images/error-object-2.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Encoding More Information In an Error
+
+- We want an object like an 'Error', but we want to add in some more custom properties to it
+- Usually a sign you want to subclass something!
+- [Custom errors, extending Error](https://javascript.info/custom-errors)
+
+![](images/subclass.jpg)
+![](images/handle-errors-details.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Subclassing for Custom Errors
+
+```typescript
+// request-validation-error.ts
+import { ValidationError } from 'express-validator';
+
+export class RequestValidationError extends Error {
+  constructor(public errors: ValidationError[]) {
+    super();
+
+    // Only because we are extending a built in class
+    Object.setPrototypeOf(this, RequestValidationError.prototype)
+  }
+}
+```
+
+```typescript
+// database-connection-error copy.ts
+export class DatabaseConnectionError extends Error {
+  reason = 'Error connecting to database'
+  
+  constructor() {
+    super();
+
+    // Only because we are extending a built in class
+    Object.setPrototypeOf(this, DatabaseConnectionError.prototype)
+  }
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Determining Error Type
+
+```typescript
+import { Request, Response, NextFunction } from 'express';
+import { RequestValidationError } from '../errors/request-validation-error';
+import { DatabaseConnectionError } from '../errors/database-connection-error copy';
+
+export const errorHandler = (
+  err: Error, 
+  req: Request, 
+  res: Response, 
+  next: NextFunction
+) => {
+  if(err instanceof RequestValidationError) {
+    console.log('handling this error as a request validation error')
+  }
+
+  if(err instanceof DatabaseConnectionError) {
+    console.log('handling this error as a database connection error')
+  }
+
+  res.status(400).send({
+    message: err.message
+  });
+};
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Converting Errors to Responses
+
+![](images/common-response-structure.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Moving Logic Into Errors
+
+![](images/error-handling-issue.jpg)
+![](images/error-handling-solution.jpg)
+
+```typescript
+// database-connection-error.ts
+export class DatabaseConnectionError extends Error {
+  statusCode = 500;
+  reason = 'Error connecting to database'
+
+  constructor() {
+    super();
+
+    // Only because we are extending a built in class
+    Object.setPrototypeOf(this, DatabaseConnectionError.prototype)
+  }
+
+  serializeErrors() {
+    return [{ message: this.reason }];
+  }
+}
+```
+
+```typescript
+// request-validation-error.ts
+import { ValidationError } from 'express-validator';
+
+export class RequestValidationError extends Error {
+  statusCode = 400;
+
+  constructor(public errors: ValidationError[]) {
+    super();
+
+    // Only because we are extending a built in class
+    Object.setPrototypeOf(this, RequestValidationError.prototype)
+  }
+
+  serializeErrors() {
+    return this.errors.map(error => {
+      return { message: error.msg, field: error.param };
+    });
+  }
+}
+```
+
+```typescript
+// error-handler.ts
+import { Request, Response, NextFunction } from 'express';
+import { RequestValidationError } from '../errors/request-validation-error';
+import { DatabaseConnectionError } from '../errors/database-connection-error copy';
+
+export const errorHandler = (
+  err: Error, 
+  req: Request, 
+  res: Response, 
+  next: NextFunction
+) => {
+  if(err instanceof RequestValidationError) {
+    return res.status(err.statusCode).send({ errors: err.serializeErrors() });
+  }
+
+  if(err instanceof DatabaseConnectionError) {
+    return res.status(err.statusCode).send({ errors: err.serializeErrors() });
+  }
+
+  res.status(400).send({
+    errors: [{ message: 'Something went wrong' }]
+  });
+};
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Verifying Our Custom Errors
+
+![](images/verify-custom-error-1.jpg)
+![](images/verify-custom-error-2.jpg)
+![](images/verify-custom-error-option-1.jpg)
+```typescript
+import { ValidationError } from 'express-validator';
+
+interface CustomError {
+  statusCode: number;
+  serializeErrors(): {
+    message: string;
+    field?: string;
+  }[]
+}
+
+export class RequestValidationError extends Error implements CustomError {
+  statusCode = 400;
+
+  constructor(public errors: ValidationError[]) {
+    super();
+
+    // Only because we are extending a built in class
+    Object.setPrototypeOf(this, RequestValidationError.prototype)
+  }
+
+  serializeErrors() {
+    return this.errors.map(error => {
+      return { message: error.msg, field: error.param };
+    });
+  }
+}
+```
+![](images/verify-custom-error-option-2.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Final Error Related Code
+
+```typescript
+// custom-error.ts
+export abstract class CustomError extends Error {
+  abstract statusCode: number;
+
+  constructor(message: string) {
+    super(message);
+
+    Object.setPrototypeOf(this, CustomError.prototype);
+  }
+
+  abstract serializeErrors(): { message: string; field?: string }[];
+}
+```
+
+```typescript
+// database-connection-error.ts
+import { CustomError } from './custom-error';
+
+export class DatabaseConnectionError extends CustomError {
+  statusCode = 500;
+  reason = 'Error connecting to database'
+
+  constructor() {
+    super('Error connecting to db');
+
+    // Only because we are extending a built in class
+    Object.setPrototypeOf(this, DatabaseConnectionError.prototype)
+  }
+
+  serializeErrors() {
+    return [{ message: this.reason }];
+  }
+}
+```
+
+```typescript
+// request-validation-error.ts
+import { ValidationError } from 'express-validator';
+import { CustomError } from './custom-error';
+
+export class RequestValidationError extends CustomError {
+  statusCode = 400;
+
+  constructor(public errors: ValidationError[]) {
+    super('Invalid request parameters');
+
+    // Only because we are extending a built in class
+    Object.setPrototypeOf(this, RequestValidationError.prototype)
+  }
+
+  serializeErrors() {
+    return this.errors.map(error => {
+      return { message: error.msg, field: error.param };
+    });
+  }
+}
+```
+
+```typescript
+// error-handler.ts
+import { Request, Response, NextFunction } from 'express';
+import { CustomError } from '../errors/custom-error';
+
+export const errorHandler = (
+  err: Error, 
+  req: Request, 
+  res: Response, 
+  next: NextFunction
+) => {
+  if(err instanceof CustomError) {
+    return res.status(err.statusCode).send({ errors: err.serializeErrors() });
+  }
+
+  res.status(400).send({
+    errors: [{ message: 'Something went wrong' }]
+  });
+};
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### How to Define New Custom Errors
+
+```typescript
+import { CustomError } from './custom-error';
+
+export class NotFoundError extends CustomError {
+  statusCode = 404;
+
+  constructor() {
+    super('Route not found');
+
+    Object.setPrototypeOf(this, NotFoundError.prototype);
+  }
+
+  serializeErrors() {
+    return [{ message: 'Not Found' }];
+  }
+}
+```
+
+```typescript
+import express from 'express';
+import { json } from 'body-parser';
+
+import { currentUserRouter } from './routes/current-user';
+import { signinRouter } from './routes/signin';
+import { signoutRouter } from './routes/signout';
+import { signupRouter } from './routes/signup';
+import { errorHandler } from './middleware/error-handler';
+import { NotFoundError } from './errors/not-found-error';
+
+const app = express();
+app.use(json());
+
+app.use(currentUserRouter);
+app.use(signinRouter);
+app.use(signoutRouter);
+app.use(signupRouter);
+
+app.all('*', () => {
+  throw new NotFoundError();
+});
+
+app.use(errorHandler);
+
+app.listen(3000, () => {
+  console.log('Listening on port 3000!');
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Uh Oh... Async Error Handling
+
+```typescript
+app.all('*', async (req, res, next) => {
+  next(new NotFoundError());
+});
+```
+
+[ExpressJS Async Errors](https://github.com/davidbanham/express-async-errors)
+```typescript
+app.all('*', async (req, res) => {
+  throw new NotFoundError();
+});
+```
 
 **[⬆ back to top](#table-of-contents)**
