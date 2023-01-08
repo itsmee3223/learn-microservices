@@ -8,7 +8,7 @@ build:
   local:
     push: false
   artifacts:
-    - image: username/auth
+    - image: chesterheng/auth
       context: auth
       docker:
         dockerfile: Dockerfile
@@ -16,7 +16,7 @@ build:
         manual:
           - src: 'src/**/*.ts'
             dest: .
-    - image: username/client
+    - image: chesterheng/client
       context: client
       docker:
         dockerfile: Dockerfile
@@ -24,7 +24,7 @@ build:
         manual:
           - src: '**/*.js'
             dest: .
-    - image: username/tickets
+    - image: chesterheng/tickets
       context: tickets
       docker:
         dockerfile: Dockerfile

@@ -1,350 +1,119 @@
-## **Section 14: NATS Streaming Server - An Event Bus Implementation**
+## **Section 15: Connecting to NATS in a Node JS World**
 
 ## Table of Contents
-- [**Section 14: NATS Streaming Server - An Event Bus Implementation**](#section-14-nats-streaming-server---an-event-bus-implementation)
+- [**Section 15: Connecting to NATS in a Node JS World**](#section-15-connecting-to-nats-in-a-node-js-world)
 - [Table of Contents](#table-of-contents)
-  - [What Now?](#what-now)
-  - [Three Important Items](#three-important-items)
-  - [Creating a NATS Streaming Deployment](#creating-a-nats-streaming-deployment)
-  - [Big Notes on NATS Streaming](#big-notes-on-nats-streaming)
-  - [Building a NATS Test Project](#building-a-nats-test-project)
-  - [Port-Forwarding with Kubectl](#port-forwarding-with-kubectl)
-  - [Publishing Events](#publishing-events)
-  - [Listening For Data](#listening-for-data)
-  - [Accessing Event Data](#accessing-event-data)
-  - [Client ID Generation](#client-id-generation)
-  - [Queue Groups](#queue-groups)
-  - [Manual Ack Mode](#manual-ack-mode)
-  - [Client Health Checks](#client-health-checks)
-  - [Graceful Client Shutdown](#graceful-client-shutdown)
-  - [Core Concurrency Issues](#core-concurrency-issues)
-  - [Common Questions](#common-questions)
-  - [[Optional] More Possible Concurrency Solutions](#optional-more-possible-concurrency-solutions)
-  - [Solving Concurrency Issues](#solving-concurrency-issues)
-  - [Concurrency Control with the Tickets App](#concurrency-control-with-the-tickets-app)
-  - [Event Redelivery](#event-redelivery)
-  - [Durable Subscriptions](#durable-subscriptions)
+  - [Reusable NATS Listeners](#reusable-nats-listeners)
+  - [The Listener Abstract Class](#the-listener-abstract-class)
+  - [Extending the Listener](#extending-the-listener)
+  - [Quick Refactor](#quick-refactor)
+  - [Leveraging TypeScript for Listener Validation](#leveraging-typescript-for-listener-validation)
+  - [Subjects Enum](#subjects-enum)
+  - [Custom Event Interface](#custom-event-interface)
+  - [Enforcing Listener Subjects](#enforcing-listener-subjects)
+  - [Quick Note: 'readonly' in Typescript](#quick-note-readonly-in-typescript)
+  - [Enforcing Data Types](#enforcing-data-types)
+  - [Where Does this Get Used?](#where-does-this-get-used)
+  - [Custom Publisher](#custom-publisher)
+  - [Using the Custom Publisher](#using-the-custom-publisher)
+  - [Awaiting Event Publication](#awaiting-event-publication)
+  - [Common Event Definitions Summary](#common-event-definitions-summary)
+  - [Updating the Common Module](#updating-the-common-module)
+  - [Restarting NATS](#restarting-nats)
 
-### What Now?
+### Reusable NATS Listeners
 
-![](images/options.jpg)
-![](images/option-3.jpg)
-![](images/event-bus.jpg)
+- Wow, this is a lot of boilerplate to publish/receive a message!
+- Let's try to refactor this to make it much easier to publish/receive
+- We'll write out an initial implementation in this test project, then move it to our common module
 
-**[⬆ back to top](#table-of-contents)**
-
-### Three Important Items
-
-NATS Streaming Server
-
-- Docs at: docs.nats.io
-- NATS and NATS Streaming Server are two different things
-  - [NATS Streaming Concepts](https://docs.nats.io/nats-streaming-concepts/intro)
-- NATS Streaming implements some extraordinarily important design decisions that will affect our app
-- We are going to run the official '[nats-streaming](https://hub.docker.com/_/nats-streaming)' docker image in kubernetes.  
-  - Need to read the image's docs: Commandline Options
-- [Event-Driven Microservices With NATS Streaming](https://www.slideshare.net/shijucv/eventdriven-microservices-with-nats-streaming-95207688)
+![](images/class-listener-1.jpg)
+![](images/class-listener-2.jpg)
 
 **[⬆ back to top](#table-of-contents)**
 
-### Creating a NATS Streaming Deployment
+### The Listener Abstract Class
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: nats-depl
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: nats
-  template:
-    metadata:
-      labels:
-        app: nats
-    spec:
-      containers:
-        - name: nats
-          image: nats-streaming:0.17.0
-          args:
-            [
-              '-p',
-              '4222',
-              '-m',
-              '8222',
-              '-hbi',
-              '5s',
-              '-hbt',
-              '5s',
-              '-hbf',
-              '2',
-              '-SD',
-              '-cid',
-              'ticketing',
-            ]
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: nats-srv
-spec:
-  selector:
-    app: nats
-  ports:
-    - name: client
-      protocol: TCP
-      port: 4222
-      targetPort: 4222
-    - name: monitoring
-      protocol: TCP
-      port: 8222
-      targetPort: 8222
-```
-
-```console
-cd section-14/ticketing
-skaffold dev
-kubectl get pods
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Big Notes on NATS Streaming
-
-[Stan.js - Node.js client for NATS Streaming](https://github.com/nats-io/stan.js)
-
-![](images/custom-1.jpg)
-![](images/nats-1.jpg)
-
-![](images/custom-2.jpg)
-![](images/nats-2.jpg)
-
-![](images/custom-3.jpg)
-![](images/nats-3.jpg)
-![](images/nats-3-1.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Building a NATS Test Project
-
-Short Term Goal
-
-- Create a new sub-project with typescript support
-- Install node-nats-streaming library and connect to nats streaming server
-- We should have two npm scripts, one to run code to emit events, and one to run code to listen for events
-- This program will be ran outside of kubernetes!
+![](images/class-listener-1.jpg)
 
 ```typescript
-// publisher.ts
-import nats from 'node-nats-streaming';
+abstract class Listener {
+  abstract subject: string;
+  abstract queueGroupName: string;
+  abstract onMessage(data: any, msg: Message): void;
+  private client: Stan;
+  protected ackWait = 5 * 1000;
 
-const stan = nats.connect('ticketing', 'abc', {
-  url: 'http://localhost:4222',
-});
+  constructor(client: Stan) {
+    this.client = client;
+  }
 
-stan.on('connect', () => {
-  console.log('Publisher connected to NATS');
-});
+  subscriptionOptions() {
+    return this.client
+    .subscriptionOptions()
+    .setDeliverAllAvailable()
+    .setManualAckMode(true)
+    .setAckWait(this.ackWait)
+    .setDurableName(this.queueGroupName);
+  }
+
+  listen() {
+    const subscription = this.client.subscribe(
+      this.subject,
+      this.queueGroupName,
+      this.subscriptionOptions()
+    )
+
+    subscription.on('message', (msg: Message) => {
+      console.log(`Message received: ${this.subject} / ${this.queueGroupName}`);
+
+      const parsedData = this.parseMessage(msg);
+      this.onMessage(parsedData, msg);
+    })
+  }
+
+  parseMessage(msg: Message) {
+    const data = msg.getData();
+    return typeof data === 'string'
+      ? JSON.parse(data)
+      : JSON.parse(data.toString('utf8'))
+  }
+}
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Port-Forwarding with Kubectl
+### Extending the Listener
 
-![](images/connect-1.jpg)
-![](images/connect-2.jpg)
-![](images/connect-3.jpg)
-
-- Option #3 is selected for small test program
-
-```console
-kubectl get pods
-kubectl port-forward nats-depl-7cf98f65b8-p8nk6 4222:4222
-cd section-14/ticketing/nats-test
-npm run publish
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Publishing Events
-
-![](images/publisher.jpg)
+![](images/class-listener-2.jpg)
 
 ```typescript
-// publisher.ts
-import nats from 'node-nats-streaming';
+class TicketCreatedListener extends Listener {
+  subject = 'ticket:created';
+  queueGroupName = 'payments-service';
 
-const stan = nats.connect('ticketing', 'abc', {
-  url: 'http://localhost:4222',
-});
+  onMessage(data: any, msg: Message) {
+    console.log('Event data!', data);
 
-stan.on('connect', () => {
-  console.log('Publisher connected to NATS');
-
-  const data = JSON.stringify({
-    id: '123',
-    title: 'concert',
-    price: 20
-  });
-
-  stan.publish('ticket:created', data, () => {
-    console.log('Event published');
-  })
-});
+    msg.ack();
+  }
+}
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Listening For Data
+### Quick Refactor
+
+![](images/class-listener-3.jpg)
 
 ```typescript
 // listener.ts
 import nats from 'node-nats-streaming';
-
-console.clear();
-
-const stan = nats.connect('ticketing', '123', {
-  url: 'http://localhost:4222',
-});
-
-stan.on('connect', () => {
-  console.log('Listener connected to NATS');
-
-  const subscription = stan.subscribe('ticket:created');
-
-  subscription.on('message', (msg) => {
-    console.log('Message recieved');
-  });
-});
-```
-
-- split screen to watch both publisher and listener
-![](images/split-screen.jpg)
-- type rs and enter to re-start publisher
-![](images/split-screen-rs.jps)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Accessing Event Data
-
-```typescript
-import nats, { Message } from 'node-nats-streaming';
-
-console.clear();
-
-const stan = nats.connect('ticketing', '123', {
-  url: 'http://localhost:4222',
-});
-
-stan.on('connect', () => {
-  console.log('Listener connected to NATS');
-
-  const subscription = stan.subscribe('ticket:created');
-
-  subscription.on('message', (msg: Message) => {
-    const data = msg.getData();
-
-    if (typeof data === 'string') {
-      console.log(`Received event #${msg.getSequence()}, with data: ${data}`);
-    }
-  });
-});
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Client ID Generation
-
-![](images/client-id.jpg)
-
-```typescript
 import { randomBytes } from 'crypto';
+import { TicketCreatedListener } from './events/ticket-created-listener';
 
-const stan = nats.connect('ticketing', randomBytes(4).toString('hex'), {
-  url: 'http://localhost:4222',
-});
-```
+console.clear();
 
-**[⬆ back to top](#table-of-contents)**
-
-### Queue Groups
-
-![](images/queue-groups-1.jpg)
-![](images/queue-groups-2.jpg)
-
-```typescript
-  const subscription = stan.subscribe(
-    'ticket:created', 
-    'orders-service-queue-group'
-  );
-```
-- listener join 'orders-service-queue-group'
-- publisher send a event
-- only one listener in 'orders-service-queue-group' receive the event at a time
-
-![](images/split-screen-3.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Manual Ack Mode
-
-- event can be lost for auto acknowledgement when error occurs
-
-![](images/manual-ack.jpg)
-
-- listener manually acknowledge once it process the message successfully
-
-```typescript
-stan.on('connect', () => {
-  console.log('Listener connected to NATS');
-
-  const options = stan
-    .subscriptionOptions()
-    .setManualAckMode(true);
-  const subscription = stan.subscribe(
-    'ticket:created', 
-    'orders-service-queue-group',
-    options
-  );
-
-  subscription.on('message', (msg: Message) => {
-    const data = msg.getData();
-
-    if (typeof data === 'string') {
-      console.log(`Received event #${msg.getSequence()}, with data: ${data}`);
-    }
-
-    msg.ack();
-  });
-});
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Client Health Checks
-
-- monitoring port 8222 for debugging
-
-```console
-kubectl get pods
-kubectl port-forward nats-depl-7cf98f65b8-p8nk6 8222:8222
-```
-
-- open chrome
-- goto localhost:8222/streaming
-
-goto http://localhost:8222/streaming/channelsz?subs=1
-
-- 2 listeners are available
-- if re-start one listener, within 30s there are 3 listeners
-- after 30s, drops back to 2 listeners
-
-**[⬆ back to top](#table-of-contents)**
-
-### Graceful Client Shutdown
-
-```typescript
 const stan = nats.connect('ticketing', randomBytes(4).toString('hex'), {
   url: 'http://localhost:4222',
 });
@@ -356,25 +125,8 @@ stan.on('connect', () => {
     console.log('NATS connection closed!');
     process.exit();
   });
-  
-  const options = stan
-    .subscriptionOptions()
-    .setManualAckMode(true);
-  const subscription = stan.subscribe(
-    'ticket:created', 
-    'orders-service-queue-group',
-    options
-  );
 
-  subscription.on('message', (msg: Message) => {
-    const data = msg.getData();
-
-    if (typeof data === 'string') {
-      console.log(`Received event #${msg.getSequence()}, with data: ${data}`);
-    }
-
-    msg.ack();
-  });
+  new TicketCreatedListener(stan).listen();
 });
 
 process.on('SIGINT', () => stan.close());
@@ -383,147 +135,236 @@ process.on('SIGTERM', () => stan.close());
 
 **[⬆ back to top](#table-of-contents)**
 
-### Core Concurrency Issues
+### Leveraging TypeScript for Listener Validation
 
-- Success
-
-![](images/account-1.jpg)
-![](images/account-2.jpg)
-![](images/account-3.jpg)
-![](images/account-4.jpg)
-
-- Fail to update +$70 at file storage
-
-![](images/fail-1.jpg)
-![](images/fail-2.jpg)
-![](images/fail-3.jpg)
-
-
-- One listener might run more quicker than another
-- -$100 is done faster than +$70 and +$40
-
-![](images/fail-4.jpg)
-
-- NATS might think a client is still alive when it is dead
-
-![](images/fail-5.jpg)
-
-- We might receive the same event twice
-
-![](images/fail-6.jpg)
+![](images/subject-name-event-data.jpg)
+![](images/ticket-created-listener.jpg)
+![](images/mismatch.jpg)
 
 **[⬆ back to top](#table-of-contents)**
 
-### Common Questions
+### Subjects Enum
 
-- Async (event-based) communication sounds terrible, right?!?!
-- Oh, turns out this happens with sync communications
-- Oh, and it happens with classic monolith style apps too.
-
-![](images/monolith.jpg)
-
-- Instance A and B are busy
-- Instance C do -$100 before +$70 and +$40 complete
-
-![](images/solution-1)
-
-- receive +$70, +$40 and -$100 events, any event can fail too
-- bottleneck for listener
-- hard to scale
-  - vertically: increase specification per service
-  - horizontally: add more instance of the service
-
-Solution that won't work #2 - Figure out every possible error case and write code to handle it
-
-- An infinite number of things can fail
-- Engineering time = $$$$$
-- Does it matter if two tweets are out of order?
-
-**[⬆ back to top](#table-of-contents)**
-
-### [Optional] More Possible Concurrency Solutions
-
-- Share state between services of last event processed
-
-![](images/share-1.jpg)
-![](images/share-2.jpg)
-![](images/share-3.jpg)
-![](images/share-4.jpg)
-
-- Event #1 fail. Cannot +$70 to User A account
-- Event #2: +$40 to User B account will be delay
-
-![](images/share-5.jpg)
-
-- Last event processed tracked by resource ID
-
-![](images/resource-id-1.jpg)
-![](images/resource-id-2.jpg)
-
-- Last Sequence ID
-
-![](images/last-seq-1.jpg)
-![](images/last-seq-2.jpg)
-![](images/last-seq-3.jpg)
-![](images/last-seq-4.jpg)
-![](images/last-seq-5.jpg)
-![](images/last-seq-6.jpg)
-![](images/last-seq-7.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Solving Concurrency Issues
-
-- We are working with a poorly designed system and relying on NATS to somehow save us
-- We should revisit the service design.
-- If we redesign the system, a better solution to this concurrency stuff will present itself
-
-![](images/concurrency-1.jpg)
-![](images/concurrency-2.jpg)
-![](images/concurrency-3.jpg)
-![](images/concurrency-4.jpg)
-![](images/concurrency-5.jpg)
-![](images/concurrency-6.jpg)
-![](images/concurrency-7.jpg)
-![](images/concurrency-8.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Concurrency Control with the Tickets App
-
-![](images/concurrency-9.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Event Redelivery
-
-![](images/event-redelivery.jpg)
+![](images/ticket-created-listener.jpg)
 
 ```typescript
-const options = stan
-  .subscriptionOptions()
-  .setManualAckMode(true)
-  .setDeliverAllAvailable();
+export enum Subjects {
+  TicketCreated = 'ticket:created',
+  OrderUpdated = 'order:updated',
+}
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Durable Subscriptions
+### Custom Event Interface
 
-![](images/durable-subscription.jpg)
+![](images/ticket-created-listener.jpg)
 
 ```typescript
-const options = stan
-  .subscriptionOptions()
-  .setManualAckMode(true)
-  .setDeliverAllAvailable()
-  .setDurableName('accounting-service');
+// ticket-created-event.ts
+import { Subjects } from "./subjects";
 
-const subscription = stan.subscribe(
-  'ticket:created',
-  'queue-group-name',
-  options
-);
+export interface TicketCreatedEvent {
+  subject: Subjects.TicketCreated;
+  data: {
+    id: string;
+    title: string;
+    price: number;
+  };
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Enforcing Listener Subjects
+
+```typescript
+// base-listener.ts
+import { Subjects } from './subjects';
+
+interface Event {
+  subject: Subjects;
+  data: any;
+}
+
+export abstract class Listener<T extends Event> {
+  abstract subject: T['subject'];
+  abstract onMessage(data: T['data'], msg: Message): void;
+}
+```
+
+```typescript
+// ticket-created-listener.ts
+import { TicketCreatedEvent } from './ticket-created-event'
+import { Subjects } from './subjects';
+
+export class TicketCreatedListener extends Listener<TicketCreatedEvent> {
+  subject: Subjects.TicketCreated = Subjects.TicketCreated;
+  ...
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Quick Note: 'readonly' in Typescript
+
+```typescript
+export class TicketCreatedListener extends Listener<TicketCreatedEvent> {
+  readonly subject = Subjects.TicketCreated;
+ 
+  // ...everything else
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Enforcing Data Types
+
+```typescript
+// ticket-created-listener.ts
+export class TicketCreatedListener extends Listener<TicketCreatedEvent> {
+
+  onMessage(data: TicketCreatedEvent['data'], msg: Message) {
+    console.log('Event data!', data);
+
+    console.log(data.id);
+    console.log(data.title);
+    console.log(data.price);
+
+    msg.ack();
+  }
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Where Does this Get Used?
+
+![](images/common-module.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Custom Publisher
+
+```typescript
+// base-publisher.ts
+import { Stan } from 'node-nats-streaming';
+import { Subjects } from './subjects';
+
+interface Event {
+  subject: Subjects;
+  data: any;
+}
+
+export abstract class Publisher<T extends Event> {
+  abstract subject: T['subject'];
+  private client: Stan;
+
+  constructor(client: Stan) {
+    this.client = client;
+  }
+
+  publish(data: T['data']) {
+    this.client.publish(this.subject, JSON.stringify(data), () => {
+      console.log('Event published.')
+    })
+  }
+}
+```
+
+```typescript
+// ticket-created-publisher.ts
+import { Publisher } from './base-publisher';
+import { TicketCreatedEvent } from './ticket-created-event'
+import { Subjects } from './subjects';
+
+export class TicketCreatedPublisher extends Publisher<TicketCreatedEvent> {
+  readonly subject = Subjects.TicketCreated;
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Using the Custom Publisher
+
+```typescript
+// publisher.ts
+stan.on('connect', () => {
+  console.log('Publisher connected to NATS');
+
+  const publisher = new TicketCreatedPublisher(stan);
+  publisher.publish({
+    id: '123',
+    title: 'concert',
+    price: 20
+  });
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Awaiting Event Publication
+
+```typescript
+// base-publisher.ts
+  publish(data: T['data']): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.client.publish(this.subject, JSON.stringify(data), (err) => {
+        if (err) {
+          return reject(err);
+        }
+        console.log('Event published to subject', this.subject);
+        resolve();
+      });
+    });
+  }
+```
+
+```typescript
+// publisher.ts
+stan.on('connect', async () => {
+  console.log('Publisher connected to NATS');
+
+  const publisher = new TicketCreatedPublisher(stan);
+  try {
+    await publisher.publish({
+      id: '123',
+      title: 'concert',
+      price: 20
+    });
+  }
+  catch (err) {
+    console.error(err);
+  }
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Common Event Definitions Summary
+
+![](images/common-event.jpg)
+![](images/common-module-2.jpg)
+![](images/common-module-3.jpg)
+![](images/cross-language-support.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Updating the Common Module
+
+- base-listener.ts
+- base-publisher.ts
+- subjects.ts
+- ticket-created-event.ts
+- ticket-updated-event.ts
+
+**[⬆ back to top](#table-of-contents)**
+
+### Restarting NATS
+
+```console
+kubectl get pods
+kubectl delete pod nats-depl-786b8cff8d-xd4tn
 ```
 
 **[⬆ back to top](#table-of-contents)**
