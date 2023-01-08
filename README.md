@@ -1,529 +1,852 @@
-## **Section 14: NATS Streaming Server - An Event Bus Implementation**
+## **Section 13: Create-Read-Update-Destroy Server Setup**
 
 ## Table of Contents
-- [**Section 14: NATS Streaming Server - An Event Bus Implementation**](#section-14-nats-streaming-server---an-event-bus-implementation)
+
+- [**Section 13: Create-Read-Update-Destroy Server Setup**](#section-13-create-read-update-destroy-server-setup)
 - [Table of Contents](#table-of-contents)
-  - [What Now?](#what-now)
-  - [Three Important Items](#three-important-items)
-  - [Creating a NATS Streaming Deployment](#creating-a-nats-streaming-deployment)
-  - [Big Notes on NATS Streaming](#big-notes-on-nats-streaming)
-  - [Building a NATS Test Project](#building-a-nats-test-project)
-  - [Port-Forwarding with Kubectl](#port-forwarding-with-kubectl)
-  - [Publishing Events](#publishing-events)
-  - [Listening For Data](#listening-for-data)
-  - [Accessing Event Data](#accessing-event-data)
-  - [Client ID Generation](#client-id-generation)
-  - [Queue Groups](#queue-groups)
-  - [Manual Ack Mode](#manual-ack-mode)
-  - [Client Health Checks](#client-health-checks)
-  - [Graceful Client Shutdown](#graceful-client-shutdown)
-  - [Core Concurrency Issues](#core-concurrency-issues)
-  - [Common Questions](#common-questions)
-  - [[Optional] More Possible Concurrency Solutions](#optional-more-possible-concurrency-solutions)
-  - [Solving Concurrency Issues](#solving-concurrency-issues)
-  - [Concurrency Control with the Tickets App](#concurrency-control-with-the-tickets-app)
-  - [Event Redelivery](#event-redelivery)
-  - [Durable Subscriptions](#durable-subscriptions)
+  - [Ticketing Service Overview](#ticketing-service-overview)
+  - [Project Setup](#project-setup)
+  - [Running the Ticket Service](#running-the-ticket-service)
+  - [Mongo Connection URI](#mongo-connection-uri)
+  - [Quick Auth Update](#quick-auth-update)
+  - [Test-First Approach](#test-first-approach)
+  - [Creating the Router](#creating-the-router)
+  - [Adding Auth Protection](#adding-auth-protection)
+  - [Faking Authentication During Tests](#faking-authentication-during-tests)
+  - [Building a Session](#building-a-session)
+  - [Testing Request Validation](#testing-request-validation)
+  - [Validating Title and Price](#validating-title-and-price)
+  - [Reminder on Mongoose with TypeScript](#reminder-on-mongoose-with-typescript)
+  - [Defining the Ticket Model](#defining-the-ticket-model)
+  - [Creation via Route Handler](#creation-via-route-handler)
+  - [Testing Show Routes](#testing-show-routes)
+  - [Unexpected Failure!](#unexpected-failure)
+  - [What's that Error?!](#whats-that-error)
+  - [Better Error Logging](#better-error-logging)
+  - [Complete Index Route Implementation](#complete-index-route-implementation)
+  - [Ticket Updating](#ticket-updating)
+  - [Handling Updates](#handling-updates)
+  - [Permission Checking](#permission-checking)
+  - [Final Update Changes](#final-update-changes)
+  - [Manual Testing](#manual-testing)
 
-### What Now?
+### Ticketing Service Overview
 
-![](images/options.jpg)
-![](images/option-3.jpg)
-![](images/event-bus.jpg)
+![](images/tickets-service.jpg)
+![](images/tickets-service-mongo-db.jpg)
+
+Steps
+
+- Create package.json, install deps
+- Write Dockerfile
+- Create index.ts to run project
+- Build image, push to docker hub
+- Write k8s file for deployment, service
+- Update skaffold.yaml to do file sync for tickets
+- Write k8s file for Mongodb deployment, service
+
+Copy from auth service to save time!
+
+- Create package.json, install deps
+- Write Dockerfile
+- Create index.ts to run project
 
 **[⬆ back to top](#table-of-contents)**
 
-### Three Important Items
+### Project Setup
 
-NATS Streaming Server
+- Build image, push to docker hub
 
-- Docs at: docs.nats.io
-- NATS and NATS Streaming Server are two different things
-  - [NATS Streaming Concepts](https://docs.nats.io/nats-streaming-concepts/intro)
-- NATS Streaming implements some extraordinarily important design decisions that will affect our app
-- We are going to run the official '[nats-streaming](https://hub.docker.com/_/nats-streaming)' docker image in kubernetes.  
-  - Need to read the image's docs: Commandline Options
-- [Event-Driven Microservices With NATS Streaming](https://www.slideshare.net/shijucv/eventdriven-microservices-with-nats-streaming-95207688)
+```console
+docker build -t username/tickets .
+docker push username/tickets
+```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Creating a NATS Streaming Deployment
+### Running the Ticket Service
+
+- Write k8s file for deployment, service
+- Update skaffold.yaml to do file sync for tickets
+- Write k8s file for Mongodb deployment, service
+
+```console
+kubectl get pods
+cd section-13/ticketing
+skaffold dev
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Mongo Connection URI
 
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: nats-depl
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: nats
-  template:
-    metadata:
-      labels:
-        app: nats
-    spec:
-      containers:
-        - name: nats
-          image: nats-streaming:0.17.0
-          args:
-            [
-              '-p',
-              '4222',
-              '-m',
-              '8222',
-              '-hbi',
-              '5s',
-              '-hbt',
-              '5s',
-              '-hbf',
-              '2',
-              '-SD',
-              '-cid',
-              'ticketing',
-            ]
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: nats-srv
-spec:
-  selector:
-    app: nats
-  ports:
-    - name: client
-      protocol: TCP
-      port: 4222
-      targetPort: 4222
-    - name: monitoring
-      protocol: TCP
-      port: 8222
-      targetPort: 8222
+- name: MONGO_URI
+  value: "mongodb://tickets-mongo-srv:27017/tickets"
 ```
-
-```console
-cd section-14/ticketing
-skaffold dev
-kubectl get pods
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Big Notes on NATS Streaming
-
-[Stan.js - Node.js client for NATS Streaming](https://github.com/nats-io/stan.js)
-
-![](images/custom-1.jpg)
-![](images/nats-1.jpg)
-
-![](images/custom-2.jpg)
-![](images/nats-2.jpg)
-
-![](images/custom-3.jpg)
-![](images/nats-3.jpg)
-![](images/nats-3-1.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Building a NATS Test Project
-
-Short Term Goal
-
-- Create a new sub-project with typescript support
-- Install node-nats-streaming library and connect to nats streaming server
-- We should have two npm scripts, one to run code to emit events, and one to run code to listen for events
-- This program will be ran outside of kubernetes!
 
 ```typescript
-// publisher.ts
-import nats from 'node-nats-streaming';
-
-const stan = nats.connect('ticketing', 'abc', {
-  url: 'http://localhost:4222',
-});
-
-stan.on('connect', () => {
-  console.log('Publisher connected to NATS');
-});
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Port-Forwarding with Kubectl
-
-![](images/connect-1.jpg)
-![](images/connect-2.jpg)
-![](images/connect-3.jpg)
-
-- Option #3 is selected for small test program
-
-```console
-kubectl get pods
-kubectl port-forward nats-depl-7cf98f65b8-p8nk6 4222:4222
-cd section-14/ticketing/nats-test
-npm run publish
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Publishing Events
-
-![](images/publisher.jpg)
-
-```typescript
-// publisher.ts
-import nats from 'node-nats-streaming';
-
-const stan = nats.connect('ticketing', 'abc', {
-  url: 'http://localhost:4222',
-});
-
-stan.on('connect', () => {
-  console.log('Publisher connected to NATS');
-
-  const data = JSON.stringify({
-    id: '123',
-    title: 'concert',
-    price: 20
+try {
+  await mongoose.connect(process.env.MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+    useCreateIndex: true,
   });
-
-  stan.publish('ticket:created', data, () => {
-    console.log('Event published');
-  })
-});
+  console.log("Connected to MongoDb");
+} catch (err) {
+  console.log(err);
+}
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Listening For Data
+### Quick Auth Update
+
+```yaml
+- name: MONGO_URI
+  value: "mongodb://auth-mongo-srv:27017/auth"
+```
 
 ```typescript
-// listener.ts
-import nats from 'node-nats-streaming';
-
-console.clear();
-
-const stan = nats.connect('ticketing', '123', {
-  url: 'http://localhost:4222',
-});
-
-stan.on('connect', () => {
-  console.log('Listener connected to NATS');
-
-  const subscription = stan.subscribe('ticket:created');
-
-  subscription.on('message', (msg) => {
-    console.log('Message recieved');
+try {
+  await mongoose.connect(process.env.MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+    useCreateIndex: true,
   });
+  console.log("Connected to MongoDb");
+} catch (err) {
+  console.log(err);
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Test-First Approach
+
+```typescript
+import request from "supertest";
+import { app } from "../../app";
+
+it("has a route handler listening to /api/tickets for post requests", async () => {});
+
+it("can only be accessed if the user is signed in", async () => {});
+
+it("returns an error if an invalid title is provided", async () => {});
+
+it("returns an error if an invalid price is provided", async () => {});
+
+it("creates a ticket with valid inputs", async () => {});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Creating the Router
+
+```typescript
+it("has a route handler listening to /api/tickets for post requests", async () => {
+  const response = await request(app).post("/api/tickets").send({});
+
+  expect(response.status).not.toEqual(404);
 });
 ```
 
-- split screen to watch both publisher and listener
-![](images/split-screen.jpg)
-- type rs and enter to re-start publisher
-![](images/split-screen-rs.jps)
+```typescript
+import express, { Request, Response } from "express";
+
+const router = express.Router();
+
+router.post("/api/tickets", (req: Request, res: Response) => {
+  res.sendStatus(200);
+});
+
+export { router as createTicketRouter };
+```
+
+```typescript
+app.use(createTicketRouter);
+```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Accessing Event Data
+### Adding Auth Protection
 
 ```typescript
-import nats, { Message } from 'node-nats-streaming';
-
-console.clear();
-
-const stan = nats.connect('ticketing', '123', {
-  url: 'http://localhost:4222',
-});
-
-stan.on('connect', () => {
-  console.log('Listener connected to NATS');
-
-  const subscription = stan.subscribe('ticket:created');
-
-  subscription.on('message', (msg: Message) => {
-    const data = msg.getData();
-
-    if (typeof data === 'string') {
-      console.log(`Received event #${msg.getSequence()}, with data: ${data}`);
-    }
-  });
+it("can only be accessed if the user is signed in", async () => {
+  await request(app).post("/api/tickets").send({}).expect(401);
 });
 ```
 
-**[⬆ back to top](#table-of-contents)**
-
-### Client ID Generation
-
-![](images/client-id.jpg)
+```typescript
+app.use(currentUser);
+```
 
 ```typescript
-import { randomBytes } from 'crypto';
+import express, { Request, Response } from "express";
+import { requireAuth } from "@chticketing/common";
 
-const stan = nats.connect('ticketing', randomBytes(4).toString('hex'), {
-  url: 'http://localhost:4222',
+const router = express.Router();
+
+router.post("/api/tickets", requireAuth, (req: Request, res: Response) => {
+  res.sendStatus(200);
+});
+
+export { router as createTicketRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Faking Authentication During Tests
+
+```typescript
+it("returns a status other than 401 if the user is signed in", async () => {
+  const response = await request(app).post("/api/tickets").send({});
+
+  expect(response.status).not.toEqual(401);
+});
+```
+
+cookie: express:sess=eyJqd3QiOiJleUpoYkdjaU9pSklVekkxTmlJc0luUjVjQ0k2SWtwWFZDSjkuZXlKcFpDSTZJalZtTVRRd016Y3lPRFUyWkdRek1EQXhPV1U1TkdFd1pTSXNJbVZ0WVdsc0lqb2lkR1Z6ZEVCMFpYTjBMbU52YlNJc0ltbGhkQ0k2TVRVNU5URTBOekV5TW4wLkVicVlVVmY5SjIyUjlOa3k5dVhKdHl3WEh2MVI4ZURuQUlSWFl3RWw4UkEifQ==
+
+https://www.base64decode.org/
+
+- Build a JWT payload. { id, email }
+- Create the JWT!
+- Build Session object. { jwt: MY_JWT }
+- Turn that session into JSON
+- Take JSON and encode it as base64
+- return a string thats the cookie with encoded data
+
+**[⬆ back to top](#table-of-contents)**
+
+### Building a Session
+
+```typescript
+it("returns a status other than 401 if the user is signed in", async () => {
+  const response = await request(app)
+    .post("/api/tickets")
+    .set("Cookie", global.signin())
+    .send({});
+
+  expect(response.status).not.toEqual(401);
+});
+```
+
+```typescript
+global.signin = () => {
+  // Build a JWT payload. { id, email }
+  const payload = {
+    id: "5f140372856dd30019e94a0e",
+    email: "test@test.com",
+  };
+
+  // Create the JWT!
+  const token = jwt.sign(payload, process.env.JWT_KEY!);
+
+  // Build Session object. { jwt: MY_JWT }
+  const session = { jwt: token };
+
+  // Turn that session into JSON
+  const sessionJSON = JSON.stringify(session);
+
+  // Take JSON and encode it as base64
+  const base64 = Buffer.from(sessionJSON).toString("base64");
+
+  // return a string thats the cookie with encoded data
+  return [`express:sess=${base64}`];
+};
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Testing Request Validation
+
+```typescript
+it("returns an error if an invalid title is provided", async () => {
+  await request(app)
+    .post("/api/tickets")
+    .set("Cookie", global.signin())
+    .send({
+      title: "",
+      price: 10,
+    })
+    .expect(400);
+
+  await request(app)
+    .post("/api/tickets")
+    .set("Cookie", global.signin())
+    .send({
+      price: 10,
+    })
+    .expect(400);
+});
+
+it("returns an error if an invalid price is provided", async () => {
+  await request(app)
+    .post("/api/tickets")
+    .set("Cookie", global.signin())
+    .send({
+      title: "asldkjf",
+      price: -10,
+    })
+    .expect(400);
+
+  await request(app)
+    .post("/api/tickets")
+    .set("Cookie", global.signin())
+    .send({
+      title: "laskdfj",
+    })
+    .expect(400);
 });
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Queue Groups
-
-![](images/queue-groups-1.jpg)
-![](images/queue-groups-2.jpg)
+### Validating Title and Price
 
 ```typescript
-  const subscription = stan.subscribe(
-    'ticket:created', 
-    'orders-service-queue-group'
-  );
-```
-- listener join 'orders-service-queue-group'
-- publisher send a event
-- only one listener in 'orders-service-queue-group' receive the event at a time
-
-![](images/split-screen-3.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Manual Ack Mode
-
-- event can be lost for auto acknowledgement when error occurs
-
-![](images/manual-ack.jpg)
-
-- listener manually acknowledge once it process the message successfully
-
-```typescript
-stan.on('connect', () => {
-  console.log('Listener connected to NATS');
-
-  const options = stan
-    .subscriptionOptions()
-    .setManualAckMode(true);
-  const subscription = stan.subscribe(
-    'ticket:created', 
-    'orders-service-queue-group',
-    options
-  );
-
-  subscription.on('message', (msg: Message) => {
-    const data = msg.getData();
-
-    if (typeof data === 'string') {
-      console.log(`Received event #${msg.getSequence()}, with data: ${data}`);
-    }
-
-    msg.ack();
-  });
-});
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Client Health Checks
-
-- monitoring port 8222 for debugging
-
-```console
-kubectl get pods
-kubectl port-forward nats-depl-7cf98f65b8-p8nk6 8222:8222
-```
-
-- open chrome
-- goto localhost:8222/streaming
-
-goto http://localhost:8222/streaming/channelsz?subs=1
-
-- 2 listeners are available
-- if re-start one listener, within 30s there are 3 listeners
-- after 30s, drops back to 2 listeners
-
-**[⬆ back to top](#table-of-contents)**
-
-### Graceful Client Shutdown
-
-```typescript
-const stan = nats.connect('ticketing', randomBytes(4).toString('hex'), {
-  url: 'http://localhost:4222',
-});
-
-stan.on('connect', () => {
-  console.log('Listener connected to NATS');
-
-  stan.on('close', () => {
-    console.log('NATS connection closed!');
-    process.exit();
-  });
-  
-  const options = stan
-    .subscriptionOptions()
-    .setManualAckMode(true);
-  const subscription = stan.subscribe(
-    'ticket:created', 
-    'orders-service-queue-group',
-    options
-  );
-
-  subscription.on('message', (msg: Message) => {
-    const data = msg.getData();
-
-    if (typeof data === 'string') {
-      console.log(`Received event #${msg.getSequence()}, with data: ${data}`);
-    }
-
-    msg.ack();
-  });
-});
-
-process.on('SIGINT', () => stan.close());
-process.on('SIGTERM', () => stan.close());
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Core Concurrency Issues
-
-- Success
-
-![](images/account-1.jpg)
-![](images/account-2.jpg)
-![](images/account-3.jpg)
-![](images/account-4.jpg)
-
-- Fail to update +$70 at file storage
-
-![](images/fail-1.jpg)
-![](images/fail-2.jpg)
-![](images/fail-3.jpg)
-
-
-- One listener might run more quicker than another
-- -$100 is done faster than +$70 and +$40
-
-![](images/fail-4.jpg)
-
-- NATS might think a client is still alive when it is dead
-
-![](images/fail-5.jpg)
-
-- We might receive the same event twice
-
-![](images/fail-6.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Common Questions
-
-- Async (event-based) communication sounds terrible, right?!?!
-- Oh, turns out this happens with sync communications
-- Oh, and it happens with classic monolith style apps too.
-
-![](images/monolith.jpg)
-
-- Instance A and B are busy
-- Instance C do -$100 before +$70 and +$40 complete
-
-![](images/solution-1)
-
-- receive +$70, +$40 and -$100 events, any event can fail too
-- bottleneck for listener
-- hard to scale
-  - vertically: increase specification per service
-  - horizontally: add more instance of the service
-
-Solution that won't work #2 - Figure out every possible error case and write code to handle it
-
-- An infinite number of things can fail
-- Engineering time = $$$$$
-- Does it matter if two tweets are out of order?
-
-**[⬆ back to top](#table-of-contents)**
-
-### [Optional] More Possible Concurrency Solutions
-
-- Share state between services of last event processed
-
-![](images/share-1.jpg)
-![](images/share-2.jpg)
-![](images/share-3.jpg)
-![](images/share-4.jpg)
-
-- Event #1 fail. Cannot +$70 to User A account
-- Event #2: +$40 to User B account will be delay
-
-![](images/share-5.jpg)
-
-- Last event processed tracked by resource ID
-
-![](images/resource-id-1.jpg)
-![](images/resource-id-2.jpg)
-
-- Last Sequence ID
-
-![](images/last-seq-1.jpg)
-![](images/last-seq-2.jpg)
-![](images/last-seq-3.jpg)
-![](images/last-seq-4.jpg)
-![](images/last-seq-5.jpg)
-![](images/last-seq-6.jpg)
-![](images/last-seq-7.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Solving Concurrency Issues
-
-- We are working with a poorly designed system and relying on NATS to somehow save us
-- We should revisit the service design.
-- If we redesign the system, a better solution to this concurrency stuff will present itself
-
-![](images/concurrency-1.jpg)
-![](images/concurrency-2.jpg)
-![](images/concurrency-3.jpg)
-![](images/concurrency-4.jpg)
-![](images/concurrency-5.jpg)
-![](images/concurrency-6.jpg)
-![](images/concurrency-7.jpg)
-![](images/concurrency-8.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Concurrency Control with the Tickets App
-
-![](images/concurrency-9.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Event Redelivery
-
-![](images/event-redelivery.jpg)
-
-```typescript
-const options = stan
-  .subscriptionOptions()
-  .setManualAckMode(true)
-  .setDeliverAllAvailable();
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Durable Subscriptions
-
-![](images/durable-subscription.jpg)
-
-```typescript
-const options = stan
-  .subscriptionOptions()
-  .setManualAckMode(true)
-  .setDeliverAllAvailable()
-  .setDurableName('accounting-service');
-
-const subscription = stan.subscribe(
-  'ticket:created',
-  'queue-group-name',
-  options
+import express, { Request, Response } from "express";
+import { body } from "express-validator";
+import { requireAuth, validateRequest } from "@chticketing/common";
+
+const router = express.Router();
+
+router.post(
+  "/api/tickets",
+  requireAuth,
+  [
+    body("title").not().isEmpty().withMessage("Title is required"),
+    body("price")
+      .isFloat({ gt: 0 })
+      .withMessage("Price must be greater than 0"),
+  ],
+  validateRequest,
+  (req: Request, res: Response) => {
+    res.sendStatus(200);
+  }
 );
+
+export { router as createTicketRouter };
 ```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Reminder on Mongoose with TypeScript
+
+![](images/ticket-model.jpg)
+
+```typescript
+import mongoose from "mongoose";
+
+interface TicketAttrs {
+  title: string;
+  price: number;
+  userId: string;
+}
+
+interface TicketDoc extends mongoose.Document {
+  title: string;
+  price: number;
+  userId: string;
+}
+
+interface TicketModel extends mongoose.Model<TicketDoc> {
+  build(attrs: TicketAttrs): TicketDoc;
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Defining the Ticket Model
+
+```typescript
+const ticketSchema = new mongoose.Schema(
+  {
+    title: {
+      type: String,
+      required: true,
+    },
+    price: {
+      type: Number,
+      required: true,
+    },
+    userId: {
+      type: String,
+      required: true,
+    },
+  },
+  {
+    toJSON: {
+      transform(doc, ret) {
+        ret.id = ret._id;
+        delete ret._id;
+      },
+    },
+  }
+);
+
+ticketSchema.statics.build = (attrs: TicketAttrs) => {
+  return new Ticket(attrs);
+};
+
+const Ticket = mongoose.model<TicketDoc, TicketModel>("Ticket", ticketSchema);
+
+export { Ticket };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Creation via Route Handler
+
+```typescript
+it("creates a ticket with valid inputs", async () => {
+  let tickets = await Ticket.find({});
+  expect(tickets.length).toEqual(0);
+
+  const title = "asldkfj";
+
+  await request(app)
+    .post("/api/tickets")
+    .set("Cookie", global.signin())
+    .send({
+      title,
+      price: 20,
+    })
+    .expect(201);
+
+  tickets = await Ticket.find({});
+  expect(tickets.length).toEqual(1);
+  expect(tickets[0].price).toEqual(20);
+  expect(tickets[0].title).toEqual(title);
+});
+```
+
+```typescript
+import express, { Request, Response } from "express";
+import { body } from "express-validator";
+import { requireAuth, validateRequest } from "@chticketing/common";
+import { Ticket } from "../models/ticket";
+
+const router = express.Router();
+
+router.post(
+  "/api/tickets",
+  requireAuth,
+  [
+    body("title").not().isEmpty().withMessage("Title is required"),
+    body("price")
+      .isFloat({ gt: 0 })
+      .withMessage("Price must be greater than 0"),
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    const { title, price } = req.body;
+
+    const ticket = Ticket.build({
+      title,
+      price,
+      userId: req.currentUser!.id,
+    });
+    await ticket.save();
+
+    res.sendStatus(201).send(ticket);
+  }
+);
+
+export { router as createTicketRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Testing Show Routes
+
+```typescript
+it("returns a 404 if the ticket is not found", async () => {
+  await request(app).get("/api/tickets/laskdjfalksfdlkakj").send().expect(404);
+});
+
+it("returns the ticket if the ticket is found", async () => {
+  const title = "concert";
+  const price = 20;
+
+  const response = await request(app)
+    .post("/api/tickets")
+    .set("Cookie", global.signin())
+    .send({
+      title,
+      price,
+    })
+    .expect(201);
+
+  const ticketResponse = await request(app)
+    .get(`/api/tickets/${response.body.id}`)
+    .send()
+    .expect(200);
+
+  expect(ticketResponse.body.title).toEqual(title);
+  expect(ticketResponse.body.price).toEqual(price);
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Unexpected Failure!
+
+```typescript
+import express, { Request, Response } from "express";
+import { NotFoundError } from "@chticketing/common";
+import { Ticket } from "../models/ticket";
+
+const router = express.Router();
+
+router.get("/api/tickets/:id", async (req: Request, res: Response) => {
+  const ticket = await Ticket.findById(req.params.id);
+
+  if (!ticket) {
+    throw new NotFoundError();
+  }
+
+  res.send(ticket);
+});
+
+export { router as showTicketRouter };
+```
+
+```typescript
+app.use(showTicketRouter);
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### What's that Error?!
+
+```typescript
+it("returns a 404 if the ticket is not found", async () => {
+  const id = new mongoose.Types.ObjectId().toHexString();
+
+  await request(app).get(`/api/tickets/${id}`).send();
+
+  console.log(response.body);
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Better Error Logging
+
+```typescript
+import { Request, Response, NextFunction } from "express";
+import { CustomError } from "../errors/custom-error";
+
+export const errorHandler = (
+  err: Error,
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  if (err instanceof CustomError) {
+    return res.status(err.statusCode).send({ errors: err.serializeErrors() });
+  }
+
+  console.error(err);
+  res.status(400).send({
+    errors: [{ message: "Something went wrong" }],
+  });
+};
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Complete Index Route Implementation
+
+![](images/tickets-service.jpg)
+
+```typescript
+import request from "supertest";
+import { app } from "../../app";
+
+const createTicket = () => {
+  return request(app).post("/api/tickets").set("Cookie", global.signin()).send({
+    title: "asldkf",
+    price: 20,
+  });
+};
+
+it("can fetch a list of tickets", async () => {
+  await createTicket();
+  await createTicket();
+  await createTicket();
+
+  const response = await request(app).get("/api/tickets").send().expect(200);
+
+  expect(response.body.length).toEqual(3);
+});
+```
+
+```typescript
+import express, { Request, Response } from "express";
+import { Ticket } from "../models/ticket";
+
+const router = express.Router();
+
+router.get("/api/tickets", async (req: Request, res: Response) => {
+  const tickets = await Ticket.find({});
+
+  res.send(tickets);
+});
+
+export { router as indexTicketRouter };
+```
+
+```typescript
+app.use(indexTicketRouter);
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Ticket Updating
+
+![](images/tickets-service.jpg)
+
+```typescript
+it("returns a 404 if the provided id does not exist", async () => {
+  const id = new mongoose.Types.ObjectId().toHexString();
+  await request(app)
+    .put(`/api/tickets/${id}`)
+    .set("Cookie", global.signin())
+    .send({
+      title: "aslkdfj",
+      price: 20,
+    })
+    .expect(404);
+});
+
+it("returns a 401 if the user is not authenticated", async () => {
+  const id = new mongoose.Types.ObjectId().toHexString();
+  await request(app)
+    .put(`/api/tickets/${id}`)
+    .send({
+      title: "aslkdfj",
+      price: 20,
+    })
+    .expect(401);
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Handling Updates
+
+```typescript
+import express, { Request, Response } from "express";
+import { body } from "express-validator";
+import {
+  validateRequest,
+  NotFoundError,
+  requireAuth,
+  NotAuthorizedError,
+} from "@chticketing/common";
+import { Ticket } from "../models/ticket";
+
+const router = express.Router();
+
+router.put(
+  "/api/tickets/:id",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const ticket = await Ticket.findById(req.params.id);
+
+    if (!ticket) {
+      throw new NotFoundError();
+    }
+
+    res.send(ticket);
+  }
+);
+
+export { router as updateTicketRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Permission Checking
+
+```typescript
+it("returns a 401 if the user does not own the ticket", async () => {
+  const response = await request(app)
+    .post("/api/tickets")
+    .set("Cookie", global.signin())
+    .send({
+      title: "asldkfj",
+      price: 20,
+    });
+
+  await request(app)
+    .put(`/api/tickets/${response.body.id}`)
+    .set("Cookie", global.signin())
+    .send({
+      title: "alskdjflskjdf",
+      price: 1000,
+    })
+    .expect(401);
+});
+```
+
+```typescript
+import express, { Request, Response } from "express";
+import { body } from "express-validator";
+import {
+  validateRequest,
+  NotFoundError,
+  requireAuth,
+  NotAuthorizedError,
+} from "@chticketing/common";
+import { Ticket } from "../models/ticket";
+
+const router = express.Router();
+
+router.put(
+  "/api/tickets/:id",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const ticket = await Ticket.findById(req.params.id);
+
+    if (!ticket) {
+      throw new NotFoundError();
+    }
+
+    if (ticket.userId !== req.currentUser!.id) {
+      throw new NotAuthorizedError();
+    }
+
+    res.send(ticket);
+  }
+);
+
+export { router as updateTicketRouter };
+```
+
+```typescript
+const payload = {
+  id: new mongoose.Types.ObjectId().toHexString(),
+  email: "test@test.com",
+};
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Final Update Changes
+
+```typescript
+it("returns a 400 if the user provides an invalid title or price", async () => {
+  const cookie = global.signin();
+
+  const response = await request(app)
+    .post("/api/tickets")
+    .set("Cookie", cookie)
+    .send({
+      title: "asldkfj",
+      price: 20,
+    });
+
+  await request(app)
+    .put(`/api/tickets/${response.body.id}`)
+    .set("Cookie", cookie)
+    .send({
+      title: "",
+      price: 20,
+    })
+    .expect(400);
+
+  await request(app)
+    .put(`/api/tickets/${response.body.id}`)
+    .set("Cookie", cookie)
+    .send({
+      title: "alskdfjj",
+      price: -10,
+    })
+    .expect(400);
+});
+
+it("updates the ticket provided valid inputs", async () => {
+  const cookie = global.signin();
+
+  const response = await request(app)
+    .post("/api/tickets")
+    .set("Cookie", cookie)
+    .send({
+      title: "asldkfj",
+      price: 20,
+    });
+
+  await request(app)
+    .put(`/api/tickets/${response.body.id}`)
+    .set("Cookie", cookie)
+    .send({
+      title: "new title",
+      price: 100,
+    })
+    .expect(200);
+
+  const ticketResponse = await request(app)
+    .get(`/api/tickets/${response.body.id}`)
+    .send();
+
+  expect(ticketResponse.body.title).toEqual("new title");
+  expect(ticketResponse.body.price).toEqual(100);
+});
+```
+
+```typescript
+import express, { Request, Response } from "express";
+import { body } from "express-validator";
+import {
+  validateRequest,
+  NotFoundError,
+  requireAuth,
+  NotAuthorizedError,
+} from "@chticketing/common";
+import { Ticket } from "../models/ticket";
+
+const router = express.Router();
+
+router.put(
+  "/api/tickets/:id",
+  requireAuth,
+  [
+    body("title").not().isEmpty().withMessage("Title is required"),
+    body("price")
+      .isFloat({ gt: 0 })
+      .withMessage("Price must be provided and must be greater than 0"),
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    const ticket = await Ticket.findById(req.params.id);
+
+    if (!ticket) {
+      throw new NotFoundError();
+    }
+
+    if (ticket.userId !== req.currentUser!.id) {
+      throw new NotAuthorizedError();
+    }
+
+    ticket.set({
+      title: req.body.title,
+      price: req.body.price,
+    });
+    await ticket.save();
+
+    res.send(ticket);
+  }
+);
+
+export { router as updateTicketRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Manual Testing
 
 **[⬆ back to top](#table-of-contents)**
