@@ -1,339 +1,839 @@
-## **Section 16: Managing a NATS Client**
+## **Section 17: Cross-Service Data Replication In Action**
 
 ## Table of Contents
-- [**Section 16: Managing a NATS Client**](#section-16-managing-a-nats-client)
+- [**Section 17: Cross-Service Data Replication In Action**](#section-17-cross-service-data-replication-in-action)
 - [Table of Contents](#table-of-contents)
-  - [Publishing Ticket Creation](#publishing-ticket-creation)
-  - [More on Publishing](#more-on-publishing)
-  - [NATS Client Singleton](#nats-client-singleton)
-  - [Remember Mongoose?](#remember-mongoose)
-  - [Singleton Implementation](#singleton-implementation)
-  - [Accessing the NATS Client](#accessing-the-nats-client)
-  - [Graceful Shutdown](#graceful-shutdown)
-  - [Successful Listen!](#successful-listen)
-  - [Ticket Update Publishing](#ticket-update-publishing)
-  - [Failed Event Publishing](#failed-event-publishing)
-  - [Handling Publish Failures](#handling-publish-failures)
-  - [Fixing a Few Tests](#fixing-a-few-tests)
-  - [Redirecting Imports](#redirecting-imports)
-  - [Providing a Mock Implementation](#providing-a-mock-implementation)
-  - [Test-Suite Wide Mocks](#test-suite-wide-mocks)
-  - [Ensuring Mock Invocations](#ensuring-mock-invocations)
-  - [NATS Env Variables](#nats-env-variables)
+  - [The Orders Service](#the-orders-service)
+  - [Scaffolding the Orders Service](#scaffolding-the-orders-service)
+  - [A Touch More Setup](#a-touch-more-setup)
+  - [Ingress Routing Rules](#ingress-routing-rules)
+  - [Scaffolding a Few Route Handlers](#scaffolding-a-few-route-handlers)
+  - [Subtle Service Coupling](#subtle-service-coupling)
+  - [Associating Orders and Tickets](#associating-orders-and-tickets)
+  - [Order Model Setup](#order-model-setup)
+  - [The Need for an Enum](#the-need-for-an-enum)
+  - [Creating an Order Status Enum](#creating-an-order-status-enum)
+  - [More on Mongoose Refs](#more-on-mongoose-refs)
+  - [Defining the Ticket Model](#defining-the-ticket-model)
+  - [Order Creation](#order-creation)
+  - [Finding Reserved Tickets](#finding-reserved-tickets)
+  - [Convenience Document Methods](#convenience-document-methods)
+  - [Order Expiration Times](#order-expiration-times)
+  - [Test Suite Setup](#test-suite-setup)
+  - [Asserting Tickets Exist](#asserting-tickets-exist)
+  - [Asserting Reserved Tickets](#asserting-reserved-tickets)
+  - [Testing the Success Case](#testing-the-success-case)
+  - [Fetching a User's Orders](#fetching-a-users-orders)
+  - [A Slightly Complicated Test](#a-slightly-complicated-test)
+  - [Fetching Individual Orders](#fetching-individual-orders)
+  - [Does Fetching Work?](#does-fetching-work)
+  - [Cancelling an Order](#cancelling-an-order)
+  - [Can We Cancel?](#can-we-cancel)
 
-### Publishing Ticket Creation
+### The Orders Service
 
-```typescript
-// ticket-created-publisher.ts
-import { Publisher, Subjects, TicketCreatedEvent } from '@chticketing/common';
+| Services   | Summary                                                                                        |
+| ---------- | ---------------------------------------------------------------------------------------------- |
+| auth       | Everything related to user signup/signin/signout                                               |
+| tickets    | Ticket creation/editing.  Knows whether a ticket can be updated                                |
+| orders     | Order creation/editing                                                                         |
+| expiration | Watches for orders to be created, cancels them after 15 minutes                                |
+| payments   | Handles credit card payments.  Cancels orders if payments fails, completes if payment succeeds |
 
-export class TicketCreatedPublisher extends Publisher<TicketCreatedEvent> {
-  subject: Subjects.TicketCreated = Subjects.TicketCreated;
-}
+![](images/app-2.jpg)
+![](images/order-service-1.jpg)
+![](images/order-service-2.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Scaffolding the Orders Service
+
+Orders Service Setup
+
+- Duplicate the 'tickets' service
+- Install dependencies
+- Build an image out of the orders service
+- Create a Kubernetes deployment file
+- Set up file sync options in the skaffold.yaml file
+- Set up routing rules in the ingress service
+
+**[⬆ back to top](#table-of-contents)**
+
+### A Touch More Setup
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orders
+  template:
+    metadata:
+      labels:
+        app: orders
+    spec:
+      containers:
+        - name: orders
+          image: username/orders
+          env:
+            - name: NATS_CLUSTER_ID
+              value: 'ticketing'
+            - name: NATS_CLIENT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NATS_URL
+              value: 'http://nats-srv:4222'
+            - name: MONGO_URI
+              value: 'mongodb://orders-mongo-srv:27017/orders'
+            - name: JWT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jwt-secret
+                  key: JWT_KEY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-srv
+spec:
+  selector:
+    app: orders
+  ports:
+    - name: orders
+      protocol: TCP
+      port: 3000
+      targetPort: 3000
+```
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-mongo-depl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orders-mongo
+  template:
+    metadata:
+      labels:
+        app: orders-mongo
+    spec:
+      containers:
+        - name: orders-mongo
+          image: mongo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-mongo-srv
+spec:
+  selector:
+    app: orders-mongo
+  ports:
+    - name: db
+      protocol: TCP
+      port: 27017
+      targetPort: 27017
+```
+
+```yaml
+  - image: username/orders
+    context: orders
+    docker:
+      dockerfile: Dockerfile
+    sync:
+      manual:
+        - src: 'src/**/*.ts'
+          dest: .
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### More on Publishing
+### Ingress Routing Rules
+
+```yaml
+  - path: /api/orders/?(.*)
+    backend:
+      serviceName: orders-srv
+      servicePort: 3000
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Scaffolding a Few Route Handlers
+
+![](images/order-service-3.jpg)
 
 ```typescript
-// new.ts
-await new TicketCreatedPublisher(client).publish({
-  id: ticket.id,
-  title: ticket.title,
-  price: ticket.price,
-  userId: ticket.userId,
+import express, { Request, Response } from 'express';
+
+const router = express.Router();
+
+router.get('/api/orders', async (req: Request, res: Response) => {
+  res.send({});
 });
-```
-**[⬆ back to top](#table-of-contents)**
 
-### NATS Client Singleton
-
-Cyclic Dependency Issue
-
-![](images/cyclic-dependency.jpg)
-![](images/nats-client-singleton.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Remember Mongoose?
-
-![](images/import-mongoose.jpg)
-![](images/import-nats-client.jpg)
-
-```typescript
-// nats-wrapper.ts
-import nats, { Stan } from 'node-nats-streaming';
-
-class NatsWrapper {}
-
-export const natsWrapper = new NatsWrapper();
+export { router as indexOrderRouter };
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Singleton Implementation
+### Subtle Service Coupling
 
 ```typescript
-// nats-wrapper.ts
-import nats, { Stan } from 'node-nats-streaming';
-
-class NatsWrapper {
-  private _client?: Stan;
-
-  connect(clusterId: string, clientId: string, url: string) {
-    this._client = nats.connect(clusterId, clientId, { url });
-
-    return new Promise((resolve, reject) => {
-      this._client!.on('connect', () => {
-        console.log('Connected to NATS');
-        resolve();
-      });
-      this._client!.on('error', (err) => {
-        reject(err);
-      });
-    });
+router.post(
+  '/api/orders', 
+  requireAuth, 
+  [
+    body('ticketId')
+      .not()
+      .isEmpty()
+      .custom((input: string) => mongoose.Types.ObjectId.isValid(input))
+      .withMessage('TicketId must be provided')
+  ], 
+  validateRequest, 
+  async (req: Request, res: Response) => {
+    res.send({});
   }
+);
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Associating Orders and Tickets
+
+![](images/ticket-order.jpg)
+![](images/option-1.jpg)
+![](images/option-1-1.jpg)
+![](images/option-1-2.jpg)
+![](images/option-2.jpg)
+
+Option #2 is selected
+
+**[⬆ back to top](#table-of-contents)**
+
+### Order Model Setup
+
+```typescript
+import mongoose from 'mongoose';
+
+interface OrderAttrs {
+  userId: string;
+  status: string;
+  expiresAt: Date;
+  ticket: TicketDoc;
 }
 
-export const natsWrapper = new NatsWrapper();
-```
-
-```typescript
-  try {
-    await natsWrapper.connect(
-      'ticketing', 
-      'dhghad', 
-      'http://nats-srv:4222'
-    );
-  ...
-  }
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Accessing the NATS Client
-
-```typescript
-// nats-wrapper.ts
-import nats, { Stan } from 'node-nats-streaming';
-
-class NatsWrapper {
-  private _client?: Stan;
-
-  get client() {
-    if (!this._client) {
-      throw new Error('Cannot access NAT client before connecting')
-    }
-
-    return this._client;
-  }
-
-  connect(clusterId: string, clientId: string, url: string) {
-    this._client = nats.connect(clusterId, clientId, { url });
-
-    return new Promise((resolve, reject) => {
-      this.client.on('connect', () => {
-        console.log('Connected to NATS');
-        resolve();
-      });
-      this.client.on('error', (err) => {
-        reject(err);
-      });
-    });
-  }
+interface OrderDoc extends mongoose.Document {
+  userId: string;
+  status: string;
+  expiresAt: Date;
+  ticket: TicketDoc;
 }
 
-export const natsWrapper = new NatsWrapper();
-```
-
-```typescript
-// new.ts
-import { natsWrapper } from'../nats-wrapper';
-
-  await new TicketCreatedPublisher(natsWrapper.client).publish({
-    id: ticket.id,
-    title: ticket.title,
-    price: ticket.price,
-    userId: ticket.userId,
-  });
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Graceful Shutdown
-
-```typescript
-// index.ts
-  natsWrapper.client.on('close', () => {
-    console.log('NATS connection closed!');
-    process.exit();
-  });
-  process.on('SIGINT', () => natsWrapper.client.close());
-  process.on('SIGTERM', () => natsWrapper.client.close());
-```
-
-```console
-kubectl get pods
-kubectl delete pod nats-depl-8658cfccf-r9bt8
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Successful Listen!
-
-- Connected to NATS
-
-```console
-skaffold dev
-kubectl get pods
-kubectl port-forward nats-depl-8658cfccf-jnb7b 4222:4222
-```
-
-- Listener connected to NATS
-
-```console
-cd section-16/ticketing/nats-test
-npm run listen
-```
-
-- Create Ticket with Postman
-- Check listener receive the ticket created
-
-**[⬆ back to top](#table-of-contents)**
-
-### Ticket Update Publishing
-
-```typescript
-import { Publisher, Subjects, TicketUpdatedEvent } from '@chticketing/common';
-
-export class TicketUpdatedPublisher extends Publisher<TicketUpdatedEvent> {
-  subject: Subjects.TicketUpdated = Subjects.TicketUpdated;
+interface OrderModel extends mongoose.Model<OrderDoc> {
+  build(attrs: OrderAttrs): OrderDoc;
 }
-```
 
-```typescript
-  new TicketUpdatedPublisher(natsWrapper.client).publish({
-    id: ticket.id,
-    title: ticket.title,
-    price: ticket.price,
-    userId: ticket.userId
-  });
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Failed Event Publishing
-
-![](images/ticket-create-handler-1.jpg)
-![](images/ticket-create-handler-2.jpg)
-![](images/ticket-update-handler.jpg)
-
-![](images/failed-event-publishing-1.jpg)
-![](images/failed-event-publishing-2.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Handling Publish Failures
-
-![](images/handle-publish-failure-1.jpg)
-![](images/handle-publish-failure-2.jpg)
-![](images/handle-publish-failure-3.jpg)
-![](images/handle-publish-failure-4.jpg)
-![](images/handle-publish-failure-5.jpg)
-![](images/handle-publish-failure-6.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Fixing a Few Tests
-
-![](images/fix-test-1.jpg)
-![](images/fix-test-2.jpg)
-![](images/fix-test-3.jpg)
-
-**[⬆ back to top](#table-of-contents)**
-
-### Redirecting Imports
-
-Mocking (Faking) Imports with Jest
-
-- Find the file that we want to 'fake'
-- In the same directory, create a folder called '__mocks__'
-- In that folder, create a file with an identical name to the file we want to fake
-- Write a fake implementation
-- Tell jest to use that fake file in our test file
-```typescript
-jest.mock('../../nats-wrapper');
-```
-
-**[⬆ back to top](#table-of-contents)**
-
-### Providing a Mock Implementation
-
-![](images/mock-implementation-1.jpg)
-![](images/mock-implementation-2.jpg)
-![](images/mock-implementation-3.jpg)
-
-```typescript
-export const natsWrapper = {
-  client: {
-    publish: (subject: string, data: string, callback: () => void) => {
-      callback();
+const orderSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: String,
+      required: true,
+    },
+    status: {
+      type: String,
+      required: true,
+    },
+    expiresAt: {
+      type: mongoose.Schema.Types.Date,
+    },
+    ticket: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Ticket',
     },
   },
+  {
+    toJSON: {
+      transform(doc, ret) {
+        ret.id = ret._id;
+        delete ret._id;
+      },
+    },
+  }
+);
+
+orderSchema.statics.build = (attrs: OrderAttrs) => {
+  return new Order(attrs);
 };
-```
 
-```typescript
-// new.test.ts
-jest.mock('../../nats-wrapper');
-```
+const Order = mongoose.model<OrderDoc, OrderModel>('Order', orderSchema);
 
-**[⬆ back to top](#table-of-contents)**
-
-### Test-Suite Wide Mocks
-
-```typescript
-// setuo.ts
-jest.mock('../nats-wrapper');
+export { Order };
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### Ensuring Mock Invocations
+### The Need for an Enum
+
+![](images/enum-1.jpg)
+![](images/enum-2.jpg)
+![](images/enum-3.jpg)
+![](images/enum-4.jpg)
+![](images/enum-5.jpg)
+
+**[⬆ back to top](#table-of-contents)**
+
+### Creating an Order Status Enum
 
 ```typescript
-export const natsWrapper = {
-  client: {
-    publish: jest.fn().mockImplementation(
-      (subject: string, data: string, callback: () => void) => {
-        callback();
-    })
+export enum OrderStatus {
+  // When the order has been created, but the
+  // ticket it is trying to order has not been reserved
+  Created = 'created',
+
+  // The ticket the order is trying to reserve has already
+  // been reserved, or when the user has cancelled the order.
+  // The order expires before payment
+  Cancelled = 'cancelled',
+
+  // The order has successfully reserved the ticket
+  AwaitingPayment = 'awaiting:payment',
+
+  // The order has reserved the ticket and the user has
+  // provided payment successfully
+  Complete = 'complete',
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### More on Mongoose Refs
+
+```typescript
+// To associate an existing Order and Ticket together
+const ticket = await Ticket.findOne({});
+const order = await Order.findOne({});
+
+order.ticket = ticket;
+await order.save();
+```
+
+```typescript
+// To associate an existing Ticket with a *new* Order
+const ticket = await Ticket.findOne({});
+const order = Order.build({
+  ticket: ticket,
+  userId: '...',
+  status: OrderStatus.Created,
+  expiresAt: tomorrow
+})
+```
+
+```typescript
+// To fetch an existing Order from the database
+// with its associated Ticket
+const order = await Order.findbyId('...').populate('ticket');
+order.ticket.title
+order.ticket.price
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Defining the Ticket Model
+
+```typescript
+import mongoose from 'mongoose';
+
+interface TicketAttrs {
+  title: string;
+  price: number;
+}
+
+export interface TicketDoc extends mongoose.Document {
+  title: string;
+  price: number;
+}
+
+interface TicketModel extends mongoose.Model<TicketDoc> {
+  build(attrs: TicketAttrs): TicketDoc;
+}
+
+const ticketSchema = new mongoose.Schema(
+  {
+    title: {
+      type: String,
+      required: true,
+    },
+    price: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
   },
+  {
+    toJSON: {
+      transform(doc, ret) {
+        ret.id = ret._id;
+        delete ret._id;
+      },
+    },
+  }
+);
+
+ticketSchema.statics.build = (attrs: TicketAttrs) => {
+  return new Ticket(attrs);
 };
+
+const Ticket = mongoose.model<TicketDoc, TicketModel>('Ticket', ticketSchema);
+
+export { Ticket };
 ```
 
 **[⬆ back to top](#table-of-contents)**
 
-### NATS Env Variables
-
-```yml
-  - name: NATS_CLUSTER_ID
-    value: 'ticketing'
-  - name: NATS_CLIENT_ID
-    valueFrom:
-      fieldRef:
-        fieldPath: metadata.name
-  - name: NATS_URL
-    value: 'http://nats-srv:4222'
-```
+### Order Creation 
 
 ```typescript
-  await natsWrapper.connect(
-    process.env.NATS_CLUSTER_ID, 
-    process.env.NATS_CLIENT_ID, 
-    process.env.NATS_URL
-  );
+async (req: Request, res: Response) => {
+  const { ticketId } = req.body;
+
+  // Find the ticket the user is trying to order in the database
+  const ticket = await Ticket.findById(ticketId);
+  if (!ticket) {
+    throw new NotFoundError();
+  }
+
+  // Make sure that this ticket is not already reserved
+
+  // Calculate an expiration date for this order
+
+  // Build the order and save it to the database
+
+  // Publish an event saying that an order was created
+
+  res.send({});
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Finding Reserved Tickets
+
+```typescript
+  // Make sure that this ticket is not already reserved
+  // Run query to look at all orders.  Find an order where the ticket
+  // is the ticket we just found *and* the orders status is *not* cancelled.
+  // If we find an order from that means the ticket *is* reserved
+  const existingOrder = await Order.findOne({
+    ticket: ticket,
+    status: {
+      $in: [
+        OrderStatus.Created,
+        OrderStatus.AwaitingPayment,
+        OrderStatus.Complete,
+      ],
+    },
+  });
+  if (existingOrder) {
+    throw new BadRequestError('Ticket is already reserved');
+  }
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Convenience Document Methods
+
+```typescript
+ticketSchema.methods.isReserved = async function() {
+  // Run query to look at all orders.  Find an order where the ticket
+  // is the ticket we just found *and* the orders status is *not* cancelled.
+  // If we find an order from that means the ticket *is* reserved
+  const existingOrder = await Order.findOne({
+    ticket: this,
+    status: {
+      $in: [
+        OrderStatus.Created,
+        OrderStatus.AwaitingPayment,
+        OrderStatus.Complete,
+      ],
+    },
+  });
+
+  return !!existingOrder;
+}
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Order Expiration Times
+
+```typescript
+// Find the ticket the user is trying to order in the database
+const ticket = await Ticket.findById(ticketId);
+if (!ticket) {
+  throw new NotFoundError();
+}
+
+// Make sure that this ticket is not already reserved
+const isReserved = await ticket.isReserved();
+if (isReserved) {
+  throw new BadRequestError('Ticket is already reserved');
+}
+
+// Calculate an expiration date for this order
+const expiration = new Date();
+expiration.setSeconds(expiration.getSeconds() + EXPIRATION_WINDOW_SECONDS);
+
+// Build the order and save it to the database
+const order = Order.build({
+  userId: req.currentUser!.id,
+  status: OrderStatus.Created,
+  expiresAt: expiration,
+  ticket
+});
+await order.save()
+
+// Publish an event saying that an order was created
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Test Suite Setup
+
+Reuse the following files from tickets service
+
+- setup.ts
+- nats-wrapper.ts
+
+**[⬆ back to top](#table-of-contents)**
+
+### Asserting Tickets Exist
+
+```typescript
+it('returns an error if the ticket does not exist', async () => {
+  const ticketId = mongoose.Types.ObjectId();
+
+  await request(app)
+    .post('/api/orders')
+    .set('Cookie', global.signin())
+    .send({ ticketId })
+    .expect(404);
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Asserting Reserved Tickets
+
+```typescript
+it('returns an error if the ticket is already reserved', async () => {
+  const ticket = Ticket.build({
+    title: 'concert',
+    price: 20,
+  });
+  await ticket.save();
+  const order = Order.build({
+    ticket,
+    userId: 'laskdflkajsdf',
+    status: OrderStatus.Created,
+    expiresAt: new Date(),
+  });
+  await order.save();
+
+  await request(app)
+    .post('/api/orders')
+    .set('Cookie', global.signin())
+    .send({ ticketId: ticket.id })
+    .expect(400);
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Testing the Success Case
+
+```typescript
+it('reserves a ticket', async () => {
+  const ticket = Ticket.build({
+    title: 'concert',
+    price: 20,
+  });
+  await ticket.save();
+
+  await request(app)
+    .post('/api/orders')
+    .set('Cookie', global.signin())
+    .send({ ticketId: ticket.id })
+    .expect(201);
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Fetching a User's Orders
+
+```typescript
+import express, { Request, Response } from 'express';
+import { requireAuth } from '@chticketing/common';
+import { Order } from '../models/order';
+
+const router = express.Router();
+
+router.get('/api/orders', requireAuth, async (req: Request, res: Response) => {
+  const orders = await Order.find({
+    userId: req.currentUser!.id,
+  }).populate('ticket');
+
+  res.send(orders);
+});
+
+export { router as indexOrderRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### A Slightly Complicated Test
+
+```typescript
+import request from 'supertest';
+import { app } from '../../app';
+import { Order } from '../../models/order';
+import { Ticket } from '../../models/ticket';
+
+const buildTicket = async () => {
+  const ticket = Ticket.build({
+    title: 'concert',
+    price: 20,
+  });
+  await ticket.save();
+
+  return ticket;
+};
+
+it('fetches orders for an particular user', async () => {
+  // Create three tickets
+  const ticketOne = await buildTicket();
+  const ticketTwo = await buildTicket();
+  const ticketThree = await buildTicket();
+
+  const userOne = global.signin();
+  const userTwo = global.signin();
+  // Create one order as User #1
+  await request(app)
+    .post('/api/orders')
+    .set('Cookie', userOne)
+    .send({ ticketId: ticketOne.id })
+    .expect(201);
+
+  // Create two orders as User #2
+  const { body: orderOne } = await request(app)
+    .post('/api/orders')
+    .set('Cookie', userTwo)
+    .send({ ticketId: ticketTwo.id })
+    .expect(201);
+  const { body: orderTwo } = await request(app)
+    .post('/api/orders')
+    .set('Cookie', userTwo)
+    .send({ ticketId: ticketThree.id })
+    .expect(201);
+
+  // Make request to get orders for User #2
+  const response = await request(app)
+    .get('/api/orders')
+    .set('Cookie', userTwo)
+    .expect(200);
+
+  // Make sure we only got the orders for User #2
+  expect(response.body.length).toEqual(2);
+  expect(response.body[0].id).toEqual(orderOne.id);
+  expect(response.body[1].id).toEqual(orderTwo.id);
+  expect(response.body[0].ticket.id).toEqual(ticketTwo.id);
+  expect(response.body[1].ticket.id).toEqual(ticketThree.id);
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Fetching Individual Orders
+
+```typescript
+import express, { Request, Response } from 'express';
+import {
+  requireAuth,
+  NotFoundError,
+  NotAuthorizedError,
+} from '@chticketing/common';
+import { Order } from '../models/order';
+
+const router = express.Router();
+
+router.get(
+  '/api/orders/:orderId',
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const order = await Order.findById(req.params.orderId).populate('ticket');
+
+    if (!order) {
+      throw new NotFoundError();
+    }
+    if (order.userId !== req.currentUser!.id) {
+      throw new NotAuthorizedError();
+    }
+
+    res.send(order);
+  }
+);
+
+export { router as showOrderRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Does Fetching Work?
+
+```typescript
+import request from 'supertest';
+import { app } from '../../app';
+import { Ticket } from '../../models/ticket';
+
+it('fetches the order', async () => {
+  // Create a ticket
+  const ticket = Ticket.build({
+    title: 'concert',
+    price: 20,
+  });
+  await ticket.save();
+
+  const user = global.signin();
+  // make a request to build an order with this ticket
+  const { body: order } = await request(app)
+    .post('/api/orders')
+    .set('Cookie', user)
+    .send({ ticketId: ticket.id })
+    .expect(201);
+
+  // make request to fetch the order
+  const { body: fetchedOrder } = await request(app)
+    .get(`/api/orders/${order.id}`)
+    .set('Cookie', user)
+    .send()
+    .expect(200);
+
+  expect(fetchedOrder.id).toEqual(order.id);
+});
+
+it('returns an error if one user tries to fetch another users order', async () => {
+  // Create a ticket
+  const ticket = Ticket.build({
+    title: 'concert',
+    price: 20,
+  });
+  await ticket.save();
+
+  const user = global.signin();
+  // make a request to build an order with this ticket
+  const { body: order } = await request(app)
+    .post('/api/orders')
+    .set('Cookie', user)
+    .send({ ticketId: ticket.id })
+    .expect(201);
+
+  // make request to fetch the order
+  await request(app)
+    .get(`/api/orders/${order.id}`)
+    .set('Cookie', global.signin())
+    .send()
+    .expect(401);
+});
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Cancelling an Order
+
+```typescript
+import express, { Request, Response } from 'express';
+import {
+  requireAuth,
+  NotFoundError,
+  NotAuthorizedError,
+} from '@chticketing/common';
+import { Order, OrderStatus } from '../models/order';
+
+const router = express.Router();
+
+router.delete(
+  '/api/orders/:orderId',
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const { orderId } = req.params;
+
+    const order = await Order.findById(orderId);
+
+    if (!order) {
+      throw new NotFoundError();
+    }
+    if (order.userId !== req.currentUser!.id) {
+      throw new NotAuthorizedError();
+    }
+    order.status = OrderStatus.Cancelled;
+    await order.save();
+
+    res.status(204).send(order);
+  }
+);
+
+export { router as deleteOrderRouter };
+```
+
+**[⬆ back to top](#table-of-contents)**
+
+### Can We Cancel?
+
+```typescript
+import request from 'supertest';
+import { app } from '../../app';
+import { Ticket } from '../../models/ticket';
+import { Order, OrderStatus } from '../../models/order';
+
+it('marks an order as cancelled', async () => {
+  // create a ticket with Ticket Model
+  const ticket = Ticket.build({
+    title: 'concert',
+    price: 20,
+  });
+  await ticket.save();
+
+  const user = global.signin();
+  // make a request to create an order
+  const { body: order } = await request(app)
+    .post('/api/orders')
+    .set('Cookie', user)
+    .send({ ticketId: ticket.id })
+    .expect(201);
+
+  // make a request to cancel the order
+  await request(app)
+    .delete(`/api/orders/${order.id}`)
+    .set('Cookie', user)
+    .send()
+    .expect(204);
+
+  // expectation to make sure the thing is cancelled
+  const updatedOrder = await Order.findById(order.id);
+
+  expect(updatedOrder!.status).toEqual(OrderStatus.Cancelled);
+});
+
+it.todo('emits a order cancelled event');
 ```
 
 **[⬆ back to top](#table-of-contents)**
